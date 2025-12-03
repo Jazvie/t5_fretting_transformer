@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import torch
 from transformers import LogitsProcessorList
 from typing import Dict, List, Optional
@@ -14,13 +15,22 @@ from .constrained_generation import V3ConstrainedProcessor, ForcedTokenLogitsPro
 class FretT5Inference:
     """Inference pipeline for Fretting-Transformer v3."""
 
-    def __init__(self, model_path: str, checkpoint_path: str, device: Optional[str] = None):
+    def __init__(self, checkpoint_path: str, tokenizer_path: str = "universal_tokenizer", device: Optional[str] = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = MidiTabTokenizerV3.load("universal_tokenizer")
-        self.config = ModelConfig(use_pretrained=False, d_model=128, num_layers=3)
-        self.model = create_model(self.tokenizer, self.config)
+        
+        if not os.path.exists(tokenizer_path):
+             raise ValueError(f"Tokenizer not found at {tokenizer_path}")
+        self.tokenizer = MidiTabTokenizerV3.load(tokenizer_path)
         
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        
+        if "model_config" in checkpoint:
+            self.config = checkpoint["model_config"]
+        else:
+            self.config = ModelConfig(use_pretrained=False, d_model=128, num_layers=3)
+
+        self.model = create_model(self.tokenizer, self.config)
+        
         state_dict = checkpoint.get("model_state_dict", checkpoint)
         self.model.load_state_dict(state_dict, strict=False)
         self.model.to(self.device)
@@ -56,7 +66,7 @@ class FretT5Inference:
         input_ids = self.tokenizer.encode_encoder_tokens_shared(full_tokens)
         input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
         
-        logits_processors = [V3ConstrainedProcessor(self.tokenizer)]
+        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer)]
         if forced_tokens:
             logits_processors.append(ForcedTokenLogitsProcessor(forced_tokens))
             
@@ -70,24 +80,28 @@ class FretT5Inference:
         return self.tokenizer.decode_decoder_tokens(outputs[0].cpu().tolist())
 
     def _notes_to_tokens(self, notes: List[Dict]) -> List[str]:
-        """Convert note list to encoder tokens.
+        """Convert note list to encoder tokens handling chords correctly."""
+        sorted_notes = sorted(notes, key=lambda x: x.get('start', 0))
         
-        Parameters
-        ----------
-        notes : List[Dict]
-            List of dicts with 'pitch' and 'duration' keys
-            
-        Returns
-        -------
-        List[str]
-            List of token strings
-        """
         tokens = []
-        for n in notes:
+        for i, n in enumerate(sorted_notes):
             dur_ms = int(round(n['duration'] * 1000 / 100)) * 100
+            
+            is_chord = False
+            if i < len(sorted_notes) - 1:
+                current_start = n.get('start', 0)
+                next_start = sorted_notes[i+1].get('start', 0)
+                if abs(next_start - current_start) < 0.01:
+                    is_chord = True
+            
+            token_dur = 0 if is_chord else dur_ms
+            
+            if token_dur == 0 and not is_chord:
+                token_dur = 100
+
             tokens.extend([
                 f"NOTE_ON<{n['pitch']}>",
-                f"TIME_SHIFT<{dur_ms}>",
+                f"TIME_SHIFT<{token_dur}>",
                 f"NOTE_OFF<{n['pitch']}>"
             ])
         return tokens
