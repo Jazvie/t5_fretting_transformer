@@ -7,6 +7,8 @@ The constraints ensure musical validity and prevent degenerate sequences
 while maintaining the paper's intended token alternation.
 """
 
+from __future__ import annotations
+
 from typing import Set, Dict, List
 import torch
 from transformers import LogitsProcessor
@@ -15,6 +17,7 @@ from .tokenization import MidiTabTokenizerV3
 
 __all__ = [
     "V3ConstrainedProcessor",
+    "ForcedTokenLogitsProcessor",
     "create_v3_processor",
 ]
 
@@ -180,6 +183,44 @@ class V3ConstrainedProcessor(LogitsProcessor):
             })
 
         return chord_states
+
+
+class ForcedTokenLogitsProcessor(LogitsProcessor):
+    """Forces specific tokens at specific generation steps."""
+
+    def __init__(self, forced_schedule: Dict[int, int]):
+        """Initialize forced token processor.
+        
+        Parameters
+        ----------
+        forced_schedule : Dict[int, int]
+            Mapping from generation step to token ID to force
+        """
+        self.forced_schedule = forced_schedule
+    
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        """Apply forced token constraints to logits.
+        
+        Parameters
+        ----------
+        input_ids : torch.LongTensor
+            Input token IDs
+        scores : torch.FloatTensor
+            Generation logits
+            
+        Returns
+        -------
+        torch.FloatTensor
+            Modified logits with forced tokens applied
+        """
+        current_step = input_ids.shape[1] - 1
+        
+        if current_step in self.forced_schedule:
+            forced_token_id = self.forced_schedule[current_step]
+            scores.fill_(float("-inf"))
+            scores[:, forced_token_id] = 0.0
+            
+        return scores
 
 
 def create_v3_processor(tokenizer: MidiTabTokenizerV3) -> V3ConstrainedProcessor:
