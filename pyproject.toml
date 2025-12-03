@@ -1,0 +1,18 @@
+[project]
+name = "fret-t5"
+description = "Transformer-based model for converting MIDI to guitar tablature"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch",
+    "transformers",
+    "peft",
+    "numpy",
+    "tqdm",
+    "pretty_midi",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+]

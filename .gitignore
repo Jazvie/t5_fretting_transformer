@@ -75,6 +75,7 @@ logs/
 # Documentation (generated)
 CLAUDE.md
 POSTPROCESSING_SUMMARY.md
+fretting_transformer_p.md
 
 # Claude Code
 .claude/
