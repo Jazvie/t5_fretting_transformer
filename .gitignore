@@ -55,6 +55,7 @@ wandb/
 *.pth
 *.ckpt
 *.safetensors
+saved_models/
 
 # Testing scripts
 tests/
