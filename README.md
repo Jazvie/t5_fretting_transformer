@@ -20,7 +20,7 @@ For training, the model expects data in JAMS format with MIDI note annotations.
 
 ## Training
 
-Use `train_guitarset.py` to train the model.
+Use `train_guitarset.py` to train the model. Training from scratch is not advised for guitarset, as the dataset is too small for this architecture.
 
 ### Basic Usage
 
