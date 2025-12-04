@@ -58,6 +58,7 @@ wandb/
 *.ckpt
 *.safetensors
 saved_models/
+model_outputs/
 
 # Testing scripts
 tests/

@@ -728,8 +728,19 @@ def main(args: argparse.Namespace) -> None:
             checkpoint = torch.load(args.pretrained_checkpoint, map_location='cpu', weights_only=False)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 state_dict = checkpoint['model_state_dict']
+                
+                checkpoint_vocab_size = state_dict['shared.weight'].shape[0]
+                current_vocab_size = model.get_input_embeddings().weight.shape[0]
+                if checkpoint_vocab_size != current_vocab_size:
+                    print(f"   Vocab size mismatch: checkpoint={checkpoint_vocab_size}, current={current_vocab_size}")
+                    print(f"   Resizing model embeddings to {checkpoint_vocab_size}")
+                    model.resize_token_embeddings(checkpoint_vocab_size)
+                
                 model.load_state_dict(state_dict, strict=False)
                 print("   Loaded pretrained weights")
+                model.train()
+                for param in model.parameters():
+                    param.requires_grad = True
             else:
                 print("   Warning: Could not load pretrained weights")
 
@@ -739,6 +750,10 @@ def main(args: argparse.Namespace) -> None:
             try:
                 from peft import LoraConfig, TaskType, get_peft_model
 
+                if training_config.gradient_checkpointing:
+                    model.gradient_checkpointing_enable()
+                    model.config.use_cache = False
+
                 peft_config = LoraConfig(
                     task_type=TaskType.SEQ_2_SEQ_LM,
                     r=args.lora_r,
@@ -747,8 +762,8 @@ def main(args: argparse.Namespace) -> None:
                     target_modules=["q", "k", "v", "o", "wi", "wo"],
                 )
                 model = get_peft_model(model, peft_config)
+                model.enable_input_require_grads()
 
-                # Print trainable parameters
                 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
                 total_params = sum(p.numel() for p in model.parameters())
                 print(f"   Trainable: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.2f}%)")
@@ -759,6 +774,10 @@ def main(args: argparse.Namespace) -> None:
     # Train!
     print("\nStarting training...")
     print("   Evaluation uses autoregressive generation (slower but accurate)")
+    
+    # Save tokenizer to output directory to suppress PEFT warnings
+    if args.use_lora:
+        hf_tokenizer.save_pretrained(output_path)
 
     trainer = train_model(
         tokenizer=tokenizer,
