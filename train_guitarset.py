@@ -725,7 +725,7 @@ def main(args: argparse.Namespace) -> None:
         # Load pretrained weights if provided
         if args.pretrained_checkpoint:
             print(f"\nLoading pretrained checkpoint: {args.pretrained_checkpoint}")
-            checkpoint = torch.load(args.pretrained_checkpoint, map_location='cpu')
+            checkpoint = torch.load(args.pretrained_checkpoint, map_location='cpu', weights_only=False)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 state_dict = checkpoint['model_state_dict']
                 model.load_state_dict(state_dict, strict=False)

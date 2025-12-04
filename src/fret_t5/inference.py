@@ -22,7 +22,7 @@ class FretT5Inference:
              raise ValueError(f"Tokenizer not found at {tokenizer_path}")
         self.tokenizer = MidiTabTokenizerV3.load(tokenizer_path)
         
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         
         if "model_config" in checkpoint:
             self.config = checkpoint["model_config"]

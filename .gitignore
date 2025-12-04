@@ -34,6 +34,7 @@ ENV/
 *.swo
 *~
 .DS_Store
+.opencode.json
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -45,6 +46,7 @@ ENV/
 
 # Data files (training data)
 data/
+splits/
 
 # Model outputs and checkpoints
 checkpoints*/

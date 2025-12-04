@@ -89,7 +89,7 @@ config = ModelConfig(use_pretrained=False, d_model=128, num_layers=3) # Match yo
 model = create_model(tokenizer, config)
 
 # Load weights
-checkpoint = torch.load("checkpoints/best_model.pt", map_location="cpu")
+checkpoint = torch.load("checkpoints/best_model.pt", map_location="cpu", weights_only=False)
 model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 model.eval()
 
