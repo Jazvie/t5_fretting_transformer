@@ -655,6 +655,14 @@ def postprocess_with_timing(
     if len(output_tabs) == 0:
         return []
     
+    # Validate timing context matches input notes
+    if len(timing_context.note_timings) != len(input_notes):
+        raise ValueError(
+            f"Timing context has {len(timing_context.note_timings)} notes but "
+            f"encoder tokens have {len(input_notes)} notes. "
+            f"These must match for timing reconstruction."
+        )
+    
     # Align sequences
     alignments = align_sequences_with_window(input_notes, output_tabs, alignment_window)
     
@@ -662,57 +670,52 @@ def postprocess_with_timing(
     tab_events: List[TabEvent] = []
     
     for input_idx, output_idx in alignments:
-        if output_idx is None:
-            continue
-            
         out_string, out_fret, out_time_shift = output_tabs[output_idx]
         
-        # Determine corrected fingering (pitch correction)
-        if input_idx is not None and input_idx < len(input_notes):
-            input_pitch, _ = input_notes[input_idx]
-            predicted_pitch = tab_to_midi_pitch(out_string, out_fret, capo, tuning)
-            pitch_diff = abs(input_pitch - predicted_pitch)
-            
-            if pitch_diff == 0:
-                corrected_string, corrected_fret = out_string, out_fret
-            elif pitch_diff <= pitch_window:
-                alternatives = find_alternative_fingerings(input_pitch, capo, tuning)
-                if alternatives:
-                    corrected_string, corrected_fret = select_best_fingering(
-                        alternatives, out_string, out_fret
-                    )
-                else:
-                    corrected_string, corrected_fret = out_string, out_fret
+        # Require valid input alignment for timing reconstruction
+        if input_idx is None:
+            raise ValueError(
+                f"Cannot reconstruct timing: output tab {output_idx} has no matching input note. "
+                f"Model produced {len(output_tabs)} tabs for {len(input_notes)} input notes. "
+                f"This indicates the model generated more outputs than inputs."
+            )
+        
+        if input_idx >= len(timing_context.note_timings):
+            raise ValueError(
+                f"Timing context mismatch: input_idx={input_idx} but timing_context "
+                f"only has {len(timing_context.note_timings)} entries. "
+                f"This indicates a bug in the tokenization pipeline."
+            )
+        
+        # Apply pitch correction
+        input_pitch, _ = input_notes[input_idx]
+        predicted_pitch = tab_to_midi_pitch(out_string, out_fret, capo, tuning)
+        pitch_diff = abs(input_pitch - predicted_pitch)
+        
+        if pitch_diff == 0:
+            corrected_string, corrected_fret = out_string, out_fret
+        elif pitch_diff <= pitch_window:
+            alternatives = find_alternative_fingerings(input_pitch, capo, tuning)
+            if alternatives:
+                corrected_string, corrected_fret = select_best_fingering(
+                    alternatives, out_string, out_fret
+                )
             else:
                 corrected_string, corrected_fret = out_string, out_fret
-                
-            final_pitch = input_pitch
         else:
             corrected_string, corrected_fret = out_string, out_fret
-            final_pitch = tab_to_midi_pitch(out_string, out_fret, capo, tuning)
         
         # Reconstruct timing from TimingContext
-        if input_idx is not None and input_idx < len(timing_context.note_timings):
-            timing_info = timing_context.note_timings[input_idx]
-            onset_sec = timing_info.onset_sec
-            duration_sec = timing_info.duration_sec
-        else:
-            # Fallback: estimate from quantized time shifts
-            # This shouldn't happen if alignment works correctly
-            onset_sec = 0.0
-            duration_sec = out_time_shift / 1000.0
-            
-            # Try to estimate onset from previous events
-            if tab_events:
-                prev_event = tab_events[-1]
-                onset_sec = prev_event.onset_sec + prev_event.duration_sec
+        timing_info = timing_context.note_timings[input_idx]
+        onset_sec = timing_info.onset_sec
+        duration_sec = timing_info.duration_sec
         
         tab_events.append(TabEvent(
             string=corrected_string,
             fret=corrected_fret,
             onset_sec=onset_sec,
             duration_sec=duration_sec,
-            midi_pitch=final_pitch
+            midi_pitch=input_pitch
         ))
     
     return tab_events
