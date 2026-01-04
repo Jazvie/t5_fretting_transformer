@@ -62,6 +62,7 @@ model_outputs/
 
 # Testing scripts
 tests/
+run_all_tests.sh
 
 # Experimental/utility scripts (keep only guitarset_loader*.py for training)
 scripts/create_universal_tokenizer.py
