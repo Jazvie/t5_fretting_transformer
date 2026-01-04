@@ -120,7 +120,7 @@ class DataConfig:
     max_encoder_length: int = 512
     max_decoder_length: int = 512
     overlap_notes: int = 4
-    acoustic_programs: Tuple[int, int] = (25, 26)
+    acoustic_programs: Tuple[int, ...] = (24, 25, 26)  # 24=Nylon, 25=Steel (MIDI std), 26=legacy
     train_on_time_shift: bool = True  # Paper-faithful: train on both TAB and TIME_SHIFT
     tab_loss_weight: float = 1.0      # Optional weight boost for TAB tokens
     enable_conditioning: bool = False
@@ -164,7 +164,26 @@ def _tempo_map_from_pretty_midi(midi_path: Path) -> TempoMap:
 
     midi = pretty_midi.PrettyMIDI(str(midi_path))
     tempo_times, tempi = midi.get_tempo_changes()
-    tick_positions = [float(midi._time_to_tick(time)) for time in tempo_times]
+
+    # Convert time in seconds to ticks
+    # For each tempo change, calculate the tick position
+    tick_positions = []
+    current_tick = 0.0
+    prev_time = 0.0
+    prev_tempo = tempi[0] if len(tempi) > 0 else 120.0
+
+    for i, (time, tempo) in enumerate(zip(tempo_times, tempi)):
+        if i == 0:
+            tick_positions.append(0.0)
+        else:
+            # Ticks elapsed since last tempo change
+            elapsed_seconds = time - prev_time
+            ticks_per_second = (prev_tempo / 60.0) * midi.resolution
+            current_tick += elapsed_seconds * ticks_per_second
+            tick_positions.append(current_tick)
+        prev_time = time
+        prev_tempo = tempo
+
     tempo_changes = list(zip(tick_positions, (float(t) for t in tempi)))
     return TempoMap(float(midi.resolution), tempo_changes)
 
@@ -235,7 +254,8 @@ def _load_jams_events(path: Path, midi_path: Optional[Path] = None) -> List[Dict
     with path.open("r", encoding="utf-8") as fp:
         data = json.load(fp)
 
-    # Skip tempo loading - use fixed conversion for TIME_SHIFT tokenization
+    # Use fixed conversion - JAMS stores ticks at 960 ticks/beat resolution
+    # Using tempo from MIDI causes mismatch since MIDI may use different resolution
     tempo_map = None
 
     if isinstance(data, dict) and "annotations" in data:
@@ -274,8 +294,8 @@ def _parse_jams_events_simple(
                 break
             string_num = int(string_value)
 
-            # Skip frets above MAX_FRET (24)
-            if fret > 24:
+            # Skip frets outside valid range [0, 24]
+            if fret < 0 or fret > 24:
                 continue
 
             # Convert ticks to milliseconds using tempo map when available
@@ -338,8 +358,8 @@ def _parse_jams_tablature(
             # Convert ticks to milliseconds
             duration_ms = _convert_ticks_to_ms(duration_ticks, time_ticks, tempo_map)
 
-            # Skip frets above MAX_FRET (24)
-            if fret > 24:
+            # Skip frets outside valid range [0, 24]
+            if fret < 0 or fret > 24:
                 continue
 
             events.append({
@@ -479,8 +499,9 @@ def _convert_ticks_to_ms(
     """Convert MIDI ticks to milliseconds using a tempo map if available."""
 
     if tempo_map is None:
-        # Fall back to the historical approximation if tempo data is missing.
-        return duration_ticks * 1.041666
+        # Fixed conversion assuming 960 ticks/beat at 120 BPM (standard for GuitarPro)
+        # 500ms per beat / 960 ticks per beat = 0.520833 ms/tick
+        return duration_ticks * 0.520833
 
     return tempo_map.duration_ms(time_ticks, duration_ticks)
 

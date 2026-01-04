@@ -5,11 +5,18 @@ from __future__ import annotations
 import os
 import torch
 from transformers import LogitsProcessorList
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .tokenization import MidiTabTokenizerV3, STANDARD_TUNING
 from .training import create_model, ModelConfig
 from .constrained_generation import V3ConstrainedProcessor, ForcedTokenLogitsProcessor
+from .postprocess import (
+    TimingContext,
+    TabEvent,
+    midi_notes_to_encoder_tokens_with_timing,
+    postprocess_with_timing,
+    tab_events_to_dict_list,
+)
 
 
 class FretT5Inference:
@@ -105,3 +112,163 @@ class FretT5Inference:
                 f"NOTE_OFF<{n['pitch']}>"
             ])
         return tokens
+
+    def predict_with_timing(
+        self,
+        midi_notes: List[Dict],
+        capo: int = 0,
+        tuning: tuple = STANDARD_TUNING,
+        pitch_window: int = 5,
+        alignment_window: int = 5,
+        forced_tokens: Optional[Dict[int, int]] = None,
+        return_dict: bool = False,
+    ) -> List[TabEvent] | List[Dict]:
+        """Generate tablature from MIDI notes with original timing preserved.
+        
+        This is the recommended method for audio-to-tab pipelines where you need
+        the output tablature to have continuous timestamps matching the original
+        MIDI input (not quantized to 100ms steps).
+        
+        Parameters
+        ----------
+        midi_notes : List[Dict]
+            List of dicts with keys:
+            - 'pitch': MIDI pitch (int, 0-127)
+            - 'start': onset time in seconds (float)
+            - 'duration': duration in seconds (float)
+        capo : int, optional
+            Capo position for conditioning (default: 0)
+        tuning : tuple, optional  
+            Tuning tuple for conditioning (default: standard tuning)
+        pitch_window : int, optional
+            Maximum pitch difference for correction in semitones (default: 5)
+        alignment_window : int, optional
+            Window size for aligning input/output sequences (default: 5)
+        forced_tokens : Optional[Dict[int, int]], optional
+            Dict of {step: token_id} to force specific outputs
+        return_dict : bool, optional
+            If True, return list of dicts instead of TabEvent objects (default: False)
+            
+        Returns
+        -------
+        List[TabEvent] or List[Dict]
+            List of tab events with continuous timing. Each event has:
+            - string: Guitar string (1-6)
+            - fret: Fret number (0-24)
+            - onset_sec: Original onset time from MIDI
+            - duration_sec: Original duration from MIDI
+            - midi_pitch: MIDI pitch produced by this position
+            
+        Example
+        -------
+        >>> inference = FretT5Inference("checkpoint.pt")
+        >>> midi_notes = [
+        ...     {'pitch': 60, 'start': 0.0, 'duration': 0.5},
+        ...     {'pitch': 64, 'start': 0.55, 'duration': 0.3},
+        ... ]
+        >>> tab_events = inference.predict_with_timing(midi_notes)
+        >>> for event in tab_events:
+        ...     print(f"String {event.string}, Fret {event.fret} at {event.onset_sec:.3f}s")
+        """
+        # Create encoder tokens and timing context
+        encoder_tokens, timing_context = midi_notes_to_encoder_tokens_with_timing(
+            midi_notes,
+            time_shift_quantum_ms=self.tokenizer.config.time_shift_quantum_ms,
+            max_duration_ms=self.tokenizer.config.max_duration_ms,
+        )
+        
+        # Add conditioning prefix
+        prefix = self.tokenizer.build_conditioning_prefix(capo, tuning)
+        full_tokens = prefix + encoder_tokens
+        
+        # Encode and run model
+        input_ids = self.tokenizer.encode_encoder_tokens_shared(full_tokens)
+        input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
+        
+        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer)]
+        if forced_tokens:
+            logits_processors.append(ForcedTokenLogitsProcessor(forced_tokens))
+            
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_tensor,
+                max_length=512,
+                logits_processor=LogitsProcessorList(logits_processors)
+            )
+        
+        # Decode tokens
+        decoder_tokens = self.tokenizer.decode_decoder_tokens(outputs[0].cpu().tolist())
+        
+        # Postprocess with timing reconstruction
+        tab_events = postprocess_with_timing(
+            encoder_tokens=full_tokens,
+            decoder_tokens=decoder_tokens,
+            timing_context=timing_context,
+            capo=capo,
+            tuning=tuning,
+            pitch_window=pitch_window,
+            alignment_window=alignment_window,
+        )
+        
+        if return_dict:
+            return tab_events_to_dict_list(tab_events)
+        return tab_events
+    
+    def predict_raw(
+        self,
+        midi_notes: List[Dict],
+        capo: int = 0,
+        tuning: tuple = STANDARD_TUNING,
+        forced_tokens: Optional[Dict[int, int]] = None,
+    ) -> Tuple[List[str], List[str], TimingContext]:
+        """Generate tablature and return raw tokens plus timing context.
+        
+        Useful for debugging or custom postprocessing pipelines.
+        
+        Parameters
+        ----------
+        midi_notes : List[Dict]
+            List of dicts with 'pitch', 'start', 'duration' keys
+        capo : int, optional
+            Capo position for conditioning
+        tuning : tuple, optional
+            Tuning tuple for conditioning
+        forced_tokens : Optional[Dict[int, int]], optional
+            Dict of {step: token_id} to force specific outputs
+            
+        Returns
+        -------
+        Tuple[List[str], List[str], TimingContext]
+            - encoder_tokens: Full encoder token sequence (with conditioning prefix)
+            - decoder_tokens: Raw model output tokens
+            - timing_context: TimingContext for timing reconstruction
+        """
+        # Create encoder tokens and timing context
+        encoder_tokens, timing_context = midi_notes_to_encoder_tokens_with_timing(
+            midi_notes,
+            time_shift_quantum_ms=self.tokenizer.config.time_shift_quantum_ms,
+            max_duration_ms=self.tokenizer.config.max_duration_ms,
+        )
+        
+        # Add conditioning prefix
+        prefix = self.tokenizer.build_conditioning_prefix(capo, tuning)
+        full_tokens = prefix + encoder_tokens
+        
+        # Encode and run model
+        input_ids = self.tokenizer.encode_encoder_tokens_shared(full_tokens)
+        input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
+        
+        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer)]
+        if forced_tokens:
+            logits_processors.append(ForcedTokenLogitsProcessor(forced_tokens))
+            
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_tensor,
+                max_length=512,
+                logits_processor=LogitsProcessorList(logits_processors)
+            )
+        
+        decoder_tokens = self.tokenizer.decode_decoder_tokens(outputs[0].cpu().tolist())
+        
+        return full_tokens, decoder_tokens, timing_context

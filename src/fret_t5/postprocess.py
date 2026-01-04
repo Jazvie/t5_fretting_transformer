@@ -5,9 +5,85 @@ This module implements the post-processing algorithm described in section 3.5:
 - Corrects pitch errors by matching to nearest valid fingering within ±N MIDI notes
 - Corrects time shift discrepancies to match input
 - Uses fret_stretch metric to select best alternative fingering
+
+Additionally provides timing reconstruction functionality for audio-to-tab pipelines:
+- Preserves original continuous timing from MIDI input through quantized model inference
+- Reconstructs absolute timestamps for tab events during postprocessing
 """
 
-from typing import List, Tuple, Optional, Dict
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Dict, Sequence
+
+
+# ---------------------------------------------------------------------------
+# Timing Context for preserving original MIDI timing through inference
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NoteTimingInfo:
+    """Original timing information for a single note from MIDI input.
+    
+    Attributes:
+        onset_sec: Original onset time in seconds from MIDI
+        duration_sec: Original duration in seconds from MIDI  
+        pitch: MIDI pitch (for alignment verification)
+        quantized_duration_ms: The quantized TIME_SHIFT value used in tokens
+    """
+    onset_sec: float
+    duration_sec: float
+    pitch: int
+    quantized_duration_ms: int = 0
+
+
+@dataclass 
+class TimingContext:
+    """Carries original MIDI timing through the inference pipeline.
+    
+    This allows postprocessing to reconstruct continuous timestamps
+    after the model generates quantized TIME_SHIFT tokens.
+    
+    Attributes:
+        note_timings: List of NoteTimingInfo, one per input note in sequence order
+        time_shift_quantum_ms: The quantization step used (default 100ms)
+    """
+    note_timings: List[NoteTimingInfo] = field(default_factory=list)
+    time_shift_quantum_ms: int = 100
+    
+    def __len__(self) -> int:
+        return len(self.note_timings)
+    
+    def add_note(
+        self, 
+        onset_sec: float, 
+        duration_sec: float, 
+        pitch: int,
+        quantized_duration_ms: int = 0
+    ) -> None:
+        """Add a note's timing information."""
+        self.note_timings.append(NoteTimingInfo(
+            onset_sec=onset_sec,
+            duration_sec=duration_sec,
+            pitch=pitch,
+            quantized_duration_ms=quantized_duration_ms
+        ))
+
+
+@dataclass
+class TabEvent:
+    """A single tablature event with continuous timing.
+    
+    Attributes:
+        string: Guitar string number (1-6, where 1 is high E)
+        fret: Fret number (0-24)
+        onset_sec: Onset time in seconds (from original MIDI)
+        duration_sec: Duration in seconds (from original MIDI)
+        midi_pitch: The MIDI pitch this tab position produces
+    """
+    string: int
+    fret: int
+    onset_sec: float
+    duration_sec: float
+    midi_pitch: int = 0
 
 # Standard tuning (string 1 to string 6)
 STANDARD_TUNING = (64, 59, 55, 50, 45, 40)
@@ -252,7 +328,7 @@ def align_sequences_with_window(
     input_notes: List[Tuple[int, int]],
     output_tabs: List[Tuple[int, int, int]],
     window_size: int = 5
-) -> List[Tuple[Optional[int], Optional[int]]]:
+) -> List[Tuple[Optional[int], int]]:
     """
     Align input notes to output tabs using a sliding window.
 
@@ -264,7 +340,8 @@ def align_sequences_with_window(
         window_size: Maximum position difference for matching
 
     Returns:
-        List of (input_idx, output_idx) pairs, with None for unmatched positions
+        List of (input_idx, output_idx) pairs. input_idx may be None for unmatched outputs,
+        but output_idx is always a valid index.
     """
     # Simple 1-to-1 alignment when lengths match
     if len(input_notes) == len(output_tabs):
@@ -389,3 +466,326 @@ def postprocess_decoder_tokens(
         corrected_tokens.append("<eos>")
 
     return corrected_tokens
+
+
+# ---------------------------------------------------------------------------
+# Timing-Aware Postprocessing for Audio-to-Tab Pipelines
+# ---------------------------------------------------------------------------
+
+def midi_notes_to_encoder_tokens_with_timing(
+    midi_notes: List[Dict],
+    time_shift_quantum_ms: int = 100,
+    max_duration_ms: int = 5000,
+) -> Tuple[List[str], TimingContext]:
+    """Convert MIDI notes to encoder tokens while preserving original timing.
+    
+    This is the key function for the audio-to-tab pipeline. It:
+    1. Sorts notes by onset time
+    2. Detects chords (notes with same onset)
+    3. Creates quantized encoder tokens for the model
+    4. Preserves original continuous timing in TimingContext
+    
+    Args:
+        midi_notes: List of dicts with keys:
+            - 'pitch': MIDI pitch (int, 0-127)
+            - 'start': onset time in seconds (float)
+            - 'duration': duration in seconds (float)
+            Or alternatively:
+            - 'pitch': MIDI pitch
+            - 'onset': onset time in seconds (alias for 'start')
+            - 'offset': end time in seconds (duration = offset - onset)
+        time_shift_quantum_ms: Quantization step in milliseconds (default 100)
+        max_duration_ms: Maximum duration cap in milliseconds (default 5000)
+        
+    Returns:
+        Tuple of (encoder_tokens, timing_context):
+        - encoder_tokens: List of NOTE_ON, TIME_SHIFT, NOTE_OFF token strings
+        - timing_context: TimingContext with original timing for each note
+        
+    Example:
+        >>> notes = [
+        ...     {'pitch': 60, 'start': 0.0, 'duration': 0.5},
+        ...     {'pitch': 64, 'start': 0.0, 'duration': 0.5},  # chord with above
+        ...     {'pitch': 67, 'start': 0.55, 'duration': 0.3},
+        ... ]
+        >>> tokens, timing = midi_notes_to_encoder_tokens_with_timing(notes)
+        >>> # tokens ready for model, timing preserves original 0.0, 0.0, 0.55 onsets
+    """
+    # Normalize note format
+    normalized_notes = []
+    for note in midi_notes:
+        pitch = int(note['pitch'])
+        
+        # Handle different key names for onset time
+        if 'start' in note:
+            onset = float(note['start'])
+        elif 'onset' in note:
+            onset = float(note['onset'])
+        else:
+            raise ValueError("Note must have 'start' or 'onset' key")
+        
+        # Handle different key names for duration
+        if 'duration' in note:
+            duration = float(note['duration'])
+        elif 'offset' in note:
+            duration = float(note['offset']) - onset
+        else:
+            raise ValueError("Note must have 'duration' or 'offset' key")
+            
+        normalized_notes.append({
+            'pitch': pitch,
+            'onset': onset,
+            'duration': duration
+        })
+    
+    # Sort by onset time, then by pitch for consistent ordering
+    sorted_notes = sorted(normalized_notes, key=lambda n: (n['onset'], n['pitch']))
+    
+    # Group notes by onset time to detect chords
+    # Notes within 10ms of each other are considered simultaneous
+    CHORD_THRESHOLD_SEC = 0.01
+    
+    onset_groups: List[List[Dict]] = []
+    current_group: List[Dict] = []
+    current_onset: Optional[float] = None
+    
+    for note in sorted_notes:
+        if current_onset is None or abs(note['onset'] - current_onset) <= CHORD_THRESHOLD_SEC:
+            current_group.append(note)
+            if current_onset is None:
+                current_onset = note['onset']
+        else:
+            if current_group:
+                onset_groups.append(current_group)
+            current_group = [note]
+            current_onset = note['onset']
+    
+    if current_group:
+        onset_groups.append(current_group)
+    
+    # Build encoder tokens and timing context
+    encoder_tokens: List[str] = []
+    timing_context = TimingContext(time_shift_quantum_ms=time_shift_quantum_ms)
+    
+    for group_idx, group in enumerate(onset_groups):
+        for note_idx, note in enumerate(group):
+            pitch = note['pitch']
+            onset = note['onset']
+            duration = note['duration']
+            
+            # Determine if this is the last note in a chord group
+            is_chord_note = len(group) > 1
+            is_last_in_chord = note_idx == len(group) - 1
+            
+            # Calculate duration for TIME_SHIFT token
+            duration_ms = duration * 1000
+            duration_ms = min(duration_ms, max_duration_ms)
+            
+            # For chord notes (except last), use TIME_SHIFT<0>
+            if is_chord_note and not is_last_in_chord:
+                quantized_ms = 0
+            else:
+                # Quantize to nearest step
+                quantized_ms = int(round(duration_ms / time_shift_quantum_ms)) * time_shift_quantum_ms
+                # Ensure minimum duration for non-chord notes
+                if quantized_ms == 0:
+                    quantized_ms = time_shift_quantum_ms
+            
+            # Add encoder tokens
+            encoder_tokens.append(f"NOTE_ON<{pitch}>")
+            encoder_tokens.append(f"TIME_SHIFT<{quantized_ms}>")
+            encoder_tokens.append(f"NOTE_OFF<{pitch}>")
+            
+            # Preserve original timing
+            timing_context.add_note(
+                onset_sec=onset,
+                duration_sec=duration,
+                pitch=pitch,
+                quantized_duration_ms=quantized_ms
+            )
+    
+    return encoder_tokens, timing_context
+
+
+def postprocess_with_timing(
+    encoder_tokens: List[str],
+    decoder_tokens: List[str],
+    timing_context: TimingContext,
+    capo: int = 0,
+    tuning: Tuple[int, ...] = STANDARD_TUNING,
+    pitch_window: int = 5,
+    alignment_window: int = 5,
+) -> List[TabEvent]:
+    """Postprocess model output and reconstruct original timing.
+    
+    This is the main function for getting tabs with continuous timing from
+    the audio-to-tab pipeline. It:
+    1. Applies standard pitch correction
+    2. Aligns output tabs to input notes  
+    3. Reconstructs original continuous timing from TimingContext
+    
+    Args:
+        encoder_tokens: Input encoder tokens (may include CAPO/TUNING prefix)
+        decoder_tokens: Model's predicted decoder tokens
+        timing_context: TimingContext with original MIDI timing
+        capo: Capo position (0-7)
+        tuning: Guitar tuning as tuple of 6 MIDI pitches
+        pitch_window: Max pitch difference for correction (semitones)
+        alignment_window: Window size for sequence alignment
+        
+    Returns:
+        List of TabEvent objects with:
+        - string, fret: The tablature position
+        - onset_sec: Original onset time from MIDI (continuous)
+        - duration_sec: Original duration from MIDI (continuous)
+        - midi_pitch: The MIDI pitch produced by this tab position
+        
+    Example:
+        >>> # After model inference
+        >>> tab_events = postprocess_with_timing(
+        ...     encoder_tokens, decoder_tokens, timing_context
+        ... )
+        >>> for event in tab_events:
+        ...     print(f"String {event.string}, Fret {event.fret} at {event.onset_sec:.3f}s")
+    """
+    # Extract notes and tabs using existing functions
+    input_notes = extract_input_notes(encoder_tokens)
+    output_tabs = extract_output_tabs(decoder_tokens)
+    
+    if len(output_tabs) == 0:
+        return []
+    
+    # Align sequences
+    alignments = align_sequences_with_window(input_notes, output_tabs, alignment_window)
+    
+    # Build tab events with reconstructed timing
+    tab_events: List[TabEvent] = []
+    
+    for input_idx, output_idx in alignments:
+        if output_idx is None:
+            continue
+            
+        out_string, out_fret, out_time_shift = output_tabs[output_idx]
+        
+        # Determine corrected fingering (pitch correction)
+        if input_idx is not None and input_idx < len(input_notes):
+            input_pitch, _ = input_notes[input_idx]
+            predicted_pitch = tab_to_midi_pitch(out_string, out_fret, capo, tuning)
+            pitch_diff = abs(input_pitch - predicted_pitch)
+            
+            if pitch_diff == 0:
+                corrected_string, corrected_fret = out_string, out_fret
+            elif pitch_diff <= pitch_window:
+                alternatives = find_alternative_fingerings(input_pitch, capo, tuning)
+                if alternatives:
+                    corrected_string, corrected_fret = select_best_fingering(
+                        alternatives, out_string, out_fret
+                    )
+                else:
+                    corrected_string, corrected_fret = out_string, out_fret
+            else:
+                corrected_string, corrected_fret = out_string, out_fret
+                
+            final_pitch = input_pitch
+        else:
+            corrected_string, corrected_fret = out_string, out_fret
+            final_pitch = tab_to_midi_pitch(out_string, out_fret, capo, tuning)
+        
+        # Reconstruct timing from TimingContext
+        if input_idx is not None and input_idx < len(timing_context.note_timings):
+            timing_info = timing_context.note_timings[input_idx]
+            onset_sec = timing_info.onset_sec
+            duration_sec = timing_info.duration_sec
+        else:
+            # Fallback: estimate from quantized time shifts
+            # This shouldn't happen if alignment works correctly
+            onset_sec = 0.0
+            duration_sec = out_time_shift / 1000.0
+            
+            # Try to estimate onset from previous events
+            if tab_events:
+                prev_event = tab_events[-1]
+                onset_sec = prev_event.onset_sec + prev_event.duration_sec
+        
+        tab_events.append(TabEvent(
+            string=corrected_string,
+            fret=corrected_fret,
+            onset_sec=onset_sec,
+            duration_sec=duration_sec,
+            midi_pitch=final_pitch
+        ))
+    
+    return tab_events
+
+
+def tab_events_to_dict_list(tab_events: List[TabEvent]) -> List[Dict]:
+    """Convert TabEvent objects to list of dictionaries.
+    
+    Useful for serialization or integration with other systems.
+    
+    Args:
+        tab_events: List of TabEvent objects
+        
+    Returns:
+        List of dicts with keys: string, fret, onset_sec, duration_sec, midi_pitch
+    """
+    return [
+        {
+            'string': event.string,
+            'fret': event.fret,
+            'onset_sec': event.onset_sec,
+            'duration_sec': event.duration_sec,
+            'midi_pitch': event.midi_pitch,
+        }
+        for event in tab_events
+    ]
+
+
+def postprocess_to_timed_tabs(
+    midi_notes: List[Dict],
+    decoder_tokens: List[str],
+    capo: int = 0,
+    tuning: Tuple[int, ...] = STANDARD_TUNING,
+    pitch_window: int = 5,
+    alignment_window: int = 5,
+    time_shift_quantum_ms: int = 100,
+) -> List[TabEvent]:
+    """Convenience function: postprocess decoder tokens using original MIDI notes.
+    
+    This combines midi_notes_to_encoder_tokens_with_timing and postprocess_with_timing
+    into a single call for simpler integration.
+    
+    Args:
+        midi_notes: Original MIDI notes with timing (as passed to inference)
+        decoder_tokens: Model's predicted decoder tokens
+        capo: Capo position (0-7)
+        tuning: Guitar tuning
+        pitch_window: Max pitch difference for correction
+        alignment_window: Window size for alignment
+        time_shift_quantum_ms: Quantization step used during tokenization
+        
+    Returns:
+        List of TabEvent objects with reconstructed timing
+        
+    Example:
+        >>> # Full pipeline usage
+        >>> midi_notes = extract_notes_from_midi(midi_file)  # Your MIDI loader
+        >>> encoder_tokens, timing = midi_notes_to_encoder_tokens_with_timing(midi_notes)
+        >>> decoder_tokens = model.predict(encoder_tokens)  # Your model
+        >>> tab_events = postprocess_to_timed_tabs(midi_notes, decoder_tokens)
+    """
+    # Recreate encoder tokens and timing context
+    encoder_tokens, timing_context = midi_notes_to_encoder_tokens_with_timing(
+        midi_notes,
+        time_shift_quantum_ms=time_shift_quantum_ms,
+    )
+    
+    return postprocess_with_timing(
+        encoder_tokens=encoder_tokens,
+        decoder_tokens=decoder_tokens,
+        timing_context=timing_context,
+        capo=capo,
+        tuning=tuning,
+        pitch_window=pitch_window,
+        alignment_window=alignment_window,
+    )
