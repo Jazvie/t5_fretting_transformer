@@ -74,6 +74,22 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Number of epochs to wait before first evaluation (default: 5)",
     )
+    parser.add_argument(
+        "--train-manifest",
+        default="data/synthtab_acoustic_train.jsonl",
+        help="Training manifest file (default: data/synthtab_acoustic_train.jsonl)",
+    )
+    parser.add_argument(
+        "--val-manifest",
+        default="data/synthtab_acoustic_val.jsonl",
+        help="Validation manifest file (default: data/synthtab_acoustic_val.jsonl)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=120,
+        help="Number of training epochs (default: 120)",
+    )
     return parser.parse_args()
 
 
@@ -112,7 +128,7 @@ def main(args: argparse.Namespace) -> None:
     print("   Loading training set...")
     train_dataset = SynthTabTokenDataset(
         tokenizer=tokenizer,
-        manifests=[Path("data/synthtab_acoustic_train.jsonl")],
+        manifests=[Path(args.train_manifest)],
         data_config=data_config,
         split="train",
         preload=True
@@ -122,7 +138,7 @@ def main(args: argparse.Namespace) -> None:
     print("   Loading validation set...")
     val_dataset = SynthTabTokenDataset(
         tokenizer=tokenizer,
-        manifests=[Path("data/synthtab_acoustic_val.jsonl")],
+        manifests=[Path(args.val_manifest)],
         data_config=data_config,
         split="val",
         preload=True
@@ -169,7 +185,7 @@ def main(args: argparse.Namespace) -> None:
         eval_batch_size=args.eval_batch_size,
         gradient_accumulation_steps=4,
         warmup_steps=4000,
-        num_train_epochs=120,  # Increased to 120 epochs
+        num_train_epochs=args.epochs,
         logging_steps=100,
         save_total_limit=5,
         label_smoothing_factor=0.1,

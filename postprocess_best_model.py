@@ -39,6 +39,63 @@ from fret_t5.postprocess import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Difficulty Calculation Functions (from analyze_playability.py)
+# ---------------------------------------------------------------------------
+
+def fret_stretch_difficulty(p_fret: int, q_fret: int) -> float:
+    """Calculate fret stretch difficulty.
+    Moving to higher frets (positive delta) is easier (0.50x)
+    Moving to lower frets (negative delta) is harder (0.75x)
+    """
+    delta_fret = q_fret - p_fret
+    if delta_fret > 0:
+        return 0.50 * abs(delta_fret)
+    else:
+        return 0.75 * abs(delta_fret)
+
+
+def locality_difficulty(p_fret: int, q_fret: int, alpha: float = 0.25) -> float:
+    """Calculate locality difficulty. Higher frets are harder to press."""
+    return alpha * (p_fret + q_fret)
+
+
+def vertical_stretch_difficulty(p_string: int, q_string: int) -> float:
+    """Calculate vertical stretch difficulty.
+    Moving across adjacent strings (delta <= 1) is easier (0.25)
+    Moving across multiple strings (delta > 1) is harder (0.50)
+    """
+    delta_string = abs(q_string - p_string)
+    if delta_string <= 1:
+        return 0.25
+    else:
+        return 0.50
+
+
+def transition_difficulty(p: Tuple[int, int], q: Tuple[int, int]) -> float:
+    """Calculate total transition difficulty between two positions."""
+    p_string, p_fret = p
+    q_string, q_fret = q
+
+    fret_s = fret_stretch_difficulty(p_fret, q_fret)
+    loc = locality_difficulty(p_fret, q_fret)
+    vert_s = vertical_stretch_difficulty(p_string, q_string)
+
+    return fret_s + loc + vert_s
+
+
+def calculate_sequence_difficulty(positions: List[Tuple[int, int]]) -> float:
+    """Calculate mean difficulty score for a tablature sequence."""
+    if len(positions) < 2:
+        return 0.0
+
+    total_difficulty = 0.0
+    for i in range(len(positions) - 1):
+        total_difficulty += transition_difficulty(positions[i], positions[i + 1])
+
+    return total_difficulty / (len(positions) - 1)
+
+
 def load_model_and_tokenizer(checkpoint_path: str):
     """Load model from best_model.pt checkpoint."""
     print(f"Loading model from {checkpoint_path}...")
@@ -256,9 +313,14 @@ def compute_accuracy_metrics(
             if out_string == gt_string and out_fret == gt_fret:
                 tab_matches += 1
 
+    # Extract positions for difficulty calculation
+    output_positions = [(s, f) for s, f, _ in output_tabs[:min_len]]
+    difficulty = calculate_sequence_difficulty(output_positions)
+
     metrics = {
         'pitch_accuracy': (pitch_matches / min_len) * 100,
         'time_shift_accuracy': (time_shift_matches / min_len) * 100,
+        'difficulty': difficulty,
         'total_notes': min_len,
         'input_length': len(input_notes),
         'output_length': len(output_tabs)
@@ -266,8 +328,12 @@ def compute_accuracy_metrics(
 
     if ground_truth_tabs:
         metrics['tab_accuracy'] = (tab_matches / min_len) * 100
+        # Also calculate ground truth difficulty
+        gt_positions = [(s, f) for s, f, _ in ground_truth_tabs[:min_len]]
+        metrics['gt_difficulty'] = calculate_sequence_difficulty(gt_positions)
     else:
         metrics['tab_accuracy'] = 0.0
+        metrics['gt_difficulty'] = 0.0
 
     return metrics
 
@@ -359,23 +425,33 @@ def main():
     """Main evaluation loop."""
     parser = argparse.ArgumentParser(description='Post-process predictions from best_model.pt')
     parser.add_argument('checkpoint_path', type=str, help='Path to best_model.pt')
-    parser.add_argument('--dataset', type=str, choices=['synthtab', 'guitarset'], default='synthtab',
+    parser.add_argument('--dataset', type=str, choices=['synthtab', 'guitarset', 'dadagp'], default='synthtab',
                         help='Dataset to evaluate on')
     parser.add_argument('--split', type=str, choices=['train', 'val'], default='val',
-                        help='Which split to use (synthtab only)')
+                        help='Which split to use (synthtab and dadagp only)')
     parser.add_argument('--num_pieces', type=int, default=50,
                         help='Number of pieces to evaluate (0 for all)')
     parser.add_argument('--pitch_window', type=int, default=5,
                         help='Pitch correction window in MIDI notes')
     parser.add_argument('--alignment_window', type=int, default=5,
                         help='Alignment window for matching input to output')
-    parser.add_argument('--guitarset_dir', type=str, 
+    parser.add_argument('--guitarset_dir', type=str,
                         default='/data/akshaj/MusicAI/GuitarSet/annotation',
                         help='Path to GuitarSet annotation directory')
+    parser.add_argument('--split_file', type=str,
+                        default='splits/guitarset_h5_recording_splits_WITH_LEAKAGE.json',
+                        help='Path to GuitarSet split file (for --dataset guitarset)')
+    parser.add_argument('--guitarset_split', type=str, choices=['train', 'val', 'test'], default='val',
+                        help='Which split to use for GuitarSet (train, val, or test)')
     
     args = parser.parse_args()
     
-    split_info = f" ({args.split} split)" if args.dataset.lower() == "synthtab" else ""
+    if args.dataset.lower() in ("synthtab", "dadagp"):
+        split_info = f" ({args.split} split)"
+    elif args.dataset.lower() == "guitarset":
+        split_info = f" ({args.guitarset_split} split)"
+    else:
+        split_info = ""
     print("=" * 80)
     print(f"Post-Processing Evaluation on {args.dataset.upper()}{split_info}")
     print("=" * 80)
@@ -396,20 +472,40 @@ def main():
 
     # Load dataset
     if args.dataset.lower() == "guitarset":
-        # Load GuitarSet JAMS files
-        guitarset_dir = Path(args.guitarset_dir)
-        
-        if not guitarset_dir.exists():
-            print(f"ERROR: GuitarSet directory not found at {guitarset_dir}")
-            return
-        
-        jams_files = list(guitarset_dir.glob("*.jams"))
-        
-        if not jams_files:
-            print(f"ERROR: No JAMS files found in {guitarset_dir}")
-            return
-        
-        print(f"\nFound {len(jams_files)} GuitarSet pieces")
+        # Load GuitarSet JAMS files using split file
+        split_file = Path(args.split_file)
+
+        if split_file.exists():
+            import json
+            with open(split_file, 'r') as f:
+                split_data = json.load(f)
+
+            # Get the appropriate split
+            split_key = f"{args.guitarset_split}_files"
+            jams_files = [Path(p) for p in split_data.get(split_key, [])]
+
+            if not jams_files:
+                print(f"ERROR: No files found in {args.guitarset_split} split")
+                print(f"Available keys: {[k for k in split_data.keys() if k.endswith('_files')]}")
+                return
+
+            print(f"\nUsing split file: {split_file}")
+            print(f"Found {len(jams_files)} GuitarSet pieces in {args.guitarset_split} split")
+        else:
+            # Fallback to loading all files from directory
+            guitarset_dir = Path(args.guitarset_dir)
+
+            if not guitarset_dir.exists():
+                print(f"ERROR: GuitarSet directory not found at {guitarset_dir}")
+                return
+
+            jams_files = list(guitarset_dir.glob("*.jams"))
+
+            if not jams_files:
+                print(f"ERROR: No JAMS files found in {guitarset_dir}")
+                return
+
+            print(f"\nWARNING: Split file not found, using all {len(jams_files)} GuitarSet pieces")
         
         num_pieces = args.num_pieces if args.num_pieces > 0 else len(jams_files)
         num_pieces = min(num_pieces, len(jams_files))
@@ -497,7 +593,7 @@ def main():
                       f"PitchTooFar={correction_stats['pitch_too_far']}, "
                       f"Unaligned={correction_stats['unaligned_outputs']}")
     
-    elif args.dataset.lower() == "synthtab":
+    elif args.dataset.lower() in ("synthtab", "dadagp"):
         data_config = DataConfig(
             max_encoder_length=512,
             max_decoder_length=512,
@@ -506,13 +602,13 @@ def main():
             conditioning_tunings_eval=(STANDARD_TUNING,),
         )
 
-        manifest_file = f"data/synthtab_acoustic_{args.split}.jsonl"
-        
+        manifest_file = f"data/{args.dataset.lower()}_acoustic_{args.split}.jsonl"
+
         if not Path(manifest_file).exists():
             print(f"ERROR: Manifest file not found: {manifest_file}")
             return
 
-        print(f"\nLoading SynthTab {args.split} dataset...")
+        print(f"\nLoading {args.dataset.upper()} {args.split} dataset...")
         dataset = SynthTabTokenDataset(
             tokenizer=tokenizer,
             manifests=[Path(manifest_file)],
@@ -628,20 +724,37 @@ def main():
         avg_orig_tab = np.mean([m['tab_accuracy'] for m in all_original_metrics])
         avg_post_tab = np.mean([m['tab_accuracy'] for m in all_postprocessed_metrics])
 
+        # Difficulty metrics
+        avg_orig_difficulty = np.mean([m['difficulty'] for m in all_original_metrics])
+        avg_post_difficulty = np.mean([m['difficulty'] for m in all_postprocessed_metrics])
+        avg_gt_difficulty = np.mean([m.get('gt_difficulty', 0) for m in all_original_metrics])
+
         print(f"\nOriginal Model:")
         print(f"  Tab Accuracy:        {avg_orig_tab:.2f}%")
         print(f"  Pitch Accuracy:      {avg_orig_pitch:.2f}%")
         print(f"  Time Shift Accuracy: {avg_orig_time:.2f}%")
+        print(f"  Difficulty:          {avg_orig_difficulty:.3f}")
 
         print(f"\nPost-Processed:")
         print(f"  Tab Accuracy:        {avg_post_tab:.2f}%")
         print(f"  Pitch Accuracy:      {avg_post_pitch:.2f}%")
         print(f"  Time Shift Accuracy: {avg_post_time:.2f}%")
+        print(f"  Difficulty:          {avg_post_difficulty:.3f}")
 
         print(f"\nImprovement:")
         print(f"  Tab Accuracy:        +{avg_post_tab - avg_orig_tab:.2f}%")
         print(f"  Pitch Accuracy:      +{avg_post_pitch - avg_orig_pitch:.2f}%")
         print(f"  Time Shift Accuracy: +{avg_post_time - avg_orig_time:.2f}%")
+        diff_change = avg_post_difficulty - avg_orig_difficulty
+        diff_sign = "+" if diff_change >= 0 else ""
+        print(f"  Difficulty:          {diff_sign}{diff_change:.3f} {'(harder)' if diff_change > 0 else '(easier)' if diff_change < 0 else '(same)'}")
+
+        if avg_gt_difficulty > 0:
+            print(f"\nGround Truth Difficulty: {avg_gt_difficulty:.3f}")
+            gt_vs_orig = avg_orig_difficulty - avg_gt_difficulty
+            gt_vs_post = avg_post_difficulty - avg_gt_difficulty
+            print(f"  Original vs GT:      {'+' if gt_vs_orig >= 0 else ''}{gt_vs_orig:.3f}")
+            print(f"  Post-proc vs GT:     {'+' if gt_vs_post >= 0 else ''}{gt_vs_post:.3f}")
 
     print("\n" + "=" * 80)
     print("✓ Evaluation complete!")
