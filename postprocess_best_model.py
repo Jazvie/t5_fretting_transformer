@@ -22,7 +22,12 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from fret_t5.tokenization import MidiTabTokenizerV3, DEFAULT_CONDITIONING_TUNINGS
 from transformers import T5ForConditionalGeneration
-from fret_t5.data import DataConfig, SynthTabTokenDataset
+from fret_t5.data import DataConfig, SynthTabTokenDataset, chunk_tokenized_track
+from dataclasses import replace
+
+# Import GuitarSet loader functions
+sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+from guitarset_loader import load_guitarset_jams, extract_tablature_from_guitarset_jams
 
 # Standard tuning (high E to low E)
 STANDARD_TUNING = (64, 59, 55, 50, 45, 40)
@@ -37,6 +42,7 @@ from fret_t5.postprocess import (
     find_alternative_fingerings,
     select_best_fingering,
 )
+from fret_t5.constrained_generation import V3ConstrainedProcessor
 
 
 # ---------------------------------------------------------------------------
@@ -110,15 +116,25 @@ def load_model_and_tokenizer(checkpoint_path: str):
     # Load tokenizer
     tokenizer = MidiTabTokenizerV3.load("universal_tokenizer")
     
-    # Check conditioning
-    conditioning_enabled = checkpoint.get('conditioning_enabled', False)
+    # Check conditioning - look in multiple places for compatibility
+    conditioning_enabled = checkpoint.get('conditioning_enabled', None)
+    if conditioning_enabled is None:
+        # Check tokenizer_config for vocab size hint, or training_config
+        tokenizer_config = checkpoint.get('tokenizer_config')
+        if tokenizer_config and isinstance(tokenizer_config, str):
+            # If tokenizer was saved with conditioning, vocab will be larger
+            # For safety, always enable conditioning tokens for synthtab/dadagp models
+            conditioning_enabled = True
+        else:
+            conditioning_enabled = False
+
     print(f"Conditioning enabled: {conditioning_enabled}")
-    
-    if conditioning_enabled:
-        tokenizer.ensure_conditioning_tokens(
-            capo_values=tuple(range(8)),
-            tuning_options=DEFAULT_CONDITIONING_TUNINGS
-        )
+
+    # Always ensure conditioning tokens for evaluation (doesn't hurt if not used)
+    tokenizer.ensure_conditioning_tokens(
+        capo_values=tuple(range(8)),
+        tuning_options=DEFAULT_CONDITIONING_TUNINGS
+    )
     
     # Get model config
     model_config = checkpoint.get('model_config')
@@ -291,6 +307,7 @@ def compute_accuracy_metrics(
     pitch_matches = 0
     time_shift_matches = 0
     tab_matches = 0
+    tab_comparisons = 0  # Track actual number of tab comparisons
 
     ground_truth_tabs = None
     if ground_truth_tokens:
@@ -309,6 +326,7 @@ def compute_accuracy_metrics(
             time_shift_matches += 1
 
         if ground_truth_tabs and i < len(ground_truth_tabs):
+            tab_comparisons += 1
             gt_string, gt_fret, _ = ground_truth_tabs[i]
             if out_string == gt_string and out_fret == gt_fret:
                 tab_matches += 1
@@ -326,8 +344,8 @@ def compute_accuracy_metrics(
         'output_length': len(output_tabs)
     }
 
-    if ground_truth_tabs:
-        metrics['tab_accuracy'] = (tab_matches / min_len) * 100
+    if ground_truth_tabs and tab_comparisons > 0:
+        metrics['tab_accuracy'] = (tab_matches / tab_comparisons) * 100
         # Also calculate ground truth difficulty
         gt_positions = [(s, f) for s, f, _ in ground_truth_tabs[:min_len]]
         metrics['gt_difficulty'] = calculate_sequence_difficulty(gt_positions)
@@ -443,7 +461,9 @@ def main():
                         help='Path to GuitarSet split file (for --dataset guitarset)')
     parser.add_argument('--guitarset_split', type=str, choices=['train', 'val', 'test'], default='val',
                         help='Which split to use for GuitarSet (train, val, or test)')
-    
+    parser.add_argument('--manifest_suffix', type=str, default='',
+                        help='Suffix to add to manifest filename (e.g., "_80_20" for 80/20 splits)')
+
     args = parser.parse_args()
     
     if args.dataset.lower() in ("synthtab", "dadagp"):
@@ -459,28 +479,33 @@ def main():
     print(f"Num pieces: {args.num_pieces if args.num_pieces > 0 else 'all'}")
     print(f"Pitch window: {args.pitch_window}")
     print(f"Alignment window: {args.alignment_window}")
+    if args.manifest_suffix:
+        print(f"Manifest suffix: {args.manifest_suffix}")
     print("=" * 80)
 
     # Load model and tokenizer
     model, tokenizer = load_model_and_tokenizer(args.checkpoint_path)
-    
+
     if model is None or tokenizer is None:
         return
+
+    # Create constrained generation processor (matches training eval)
+    constrained_processor = V3ConstrainedProcessor(tokenizer)
+    print("✓ Using constrained generation")
 
     all_original_metrics = []
     all_postprocessed_metrics = []
 
     # Load dataset
     if args.dataset.lower() == "guitarset":
-        # Load GuitarSet JAMS files using split file
+        # Load GuitarSet using same pipeline as training (with proper chunking)
+        import json
         split_file = Path(args.split_file)
 
         if split_file.exists():
-            import json
             with open(split_file, 'r') as f:
                 split_data = json.load(f)
 
-            # Get the appropriate split
             split_key = f"{args.guitarset_split}_files"
             jams_files = [Path(p) for p in split_data.get(split_key, [])]
 
@@ -490,53 +515,99 @@ def main():
                 return
 
             print(f"\nUsing split file: {split_file}")
-            print(f"Found {len(jams_files)} GuitarSet pieces in {args.guitarset_split} split")
+            print(f"Found {len(jams_files)} GuitarSet files in {args.guitarset_split} split")
         else:
-            # Fallback to loading all files from directory
             guitarset_dir = Path(args.guitarset_dir)
-
             if not guitarset_dir.exists():
                 print(f"ERROR: GuitarSet directory not found at {guitarset_dir}")
                 return
-
             jams_files = list(guitarset_dir.glob("*.jams"))
-
             if not jams_files:
                 print(f"ERROR: No JAMS files found in {guitarset_dir}")
                 return
-
             print(f"\nWARNING: Split file not found, using all {len(jams_files)} GuitarSet pieces")
-        
-        num_pieces = args.num_pieces if args.num_pieces > 0 else len(jams_files)
-        num_pieces = min(num_pieces, len(jams_files))
-        
-        print(f"Evaluating on {num_pieces} pieces...\n")
-        
-        for i in range(num_pieces):
-            jams_path = jams_files[i]
-            print(f"\n[{i+1}/{num_pieces}] Processing {jams_path.name}...")
-            
-            # Load piece
-            tab_events = load_guitarset_piece(str(jams_path))
-            
-            if not tab_events:
-                print(f"  Skipping (no valid events)")
+
+        # Setup data config matching training (eval mode - single capo/tuning)
+        data_config = DataConfig(
+            max_encoder_length=512,
+            max_decoder_length=512,
+            enable_conditioning=True,
+            conditioning_capo_values_eval=(0,),
+            conditioning_tunings_eval=(STANDARD_TUNING,),
+        )
+
+        # Reserve space for conditioning prefix
+        capo_val = 0
+        tuning_val = STANDARD_TUNING
+        sample_prefix = tokenizer.build_conditioning_prefix(capo_val, tuning_val)
+        chunk_config = replace(data_config, max_encoder_length=data_config.max_encoder_length - len(sample_prefix))
+
+        # Load and chunk all files (matching training pipeline)
+        print(f"\nLoading and chunking GuitarSet files (matching training pipeline)...")
+        all_examples = []
+        skipped = 0
+
+        for file_path in jams_files:
+            try:
+                jams_data = load_guitarset_jams(file_path)
+                tab_events = extract_tablature_from_guitarset_jams(jams_data, auto_detect_tuning=False)
+
+                if len(tab_events) < 10:
+                    skipped += 1
+                    continue
+
+                # Convert to JAMS format for tokenizer (same as training)
+                jams_events = []
+                for event in tab_events:
+                    jams_events.append({
+                        "string": float(event["string"]),
+                        "fret": float(event["fret"]),
+                        "duration_ms": float(event.get("duration", 0.5) * 1000),
+                        "time_ticks": float(event.get("time", 0) * 1000)
+                    })
+
+                # Tokenize using same method as training
+                tokenized = tokenizer.tokenize_track_from_jams(jams_events)
+
+                # Chunk using same method as training
+                chunks = list(chunk_tokenized_track(tokenized, chunk_config))
+
+                for enc_tokens, dec_tokens, note_metadata in chunks:
+                    # Apply conditioning prefix (eval mode - capo=0, standard tuning)
+                    prefix_tokens = tokenizer.build_conditioning_prefix(capo_val, tuning_val)
+                    final_encoder = prefix_tokens + list(enc_tokens)
+                    all_examples.append({
+                        'encoder_tokens': final_encoder,
+                        'decoder_tokens': list(dec_tokens),
+                        'file_name': file_path.name
+                    })
+
+            except Exception as e:
+                skipped += 1
                 continue
-            
-            print(f"  Loaded {len(tab_events)} notes")
-            
-            # Create tokens
-            capo = 0
-            encoder_tokens, ground_truth_tokens = create_encoder_decoder_tokens(tab_events, capo)
-            
+
+        print(f"Created {len(all_examples)} chunked examples from {len(jams_files) - skipped} files ({skipped} skipped)")
+
+        num_pieces = args.num_pieces if args.num_pieces > 0 else len(all_examples)
+        num_pieces = min(num_pieces, len(all_examples))
+        print(f"\nEvaluating on {num_pieces} examples...")
+
+        for i in range(num_pieces):
+            example = all_examples[i]
+            encoder_tokens = example['encoder_tokens']
+            ground_truth_tokens = example['decoder_tokens']
+
+            print(f"\n[{i+1}/{num_pieces}] Processing chunk from {example['file_name']}...")
+            print(f"  Loaded {len(extract_input_notes(encoder_tokens))} notes")
+
             # Encode input
             encoder_ids = tokenizer.encode_encoder_tokens_shared(encoder_tokens)
             input_ids = torch.tensor(encoder_ids, dtype=torch.long).unsqueeze(0)
-            
+
             if torch.cuda.is_available():
                 input_ids = input_ids.cuda()
-            
-            # Generate prediction
+
+            # Generate prediction with constrained decoding
             with torch.no_grad():
                 outputs = model.generate(
                     input_ids,
@@ -545,25 +616,26 @@ def main():
                     do_sample=False,
                     eos_token_id=tokenizer.shared_token_to_id["<eos>"],
                     pad_token_id=tokenizer.shared_token_to_id["<pad>"],
+                    logits_processor=[constrained_processor],
                 )
-            
+
             pred_ids = outputs[0].cpu().tolist()
             pred_tokens = tokenizer.shared_to_decoder_tokens(pred_ids)
-            
+
             # Extract conditioning
             capo, tuning = extract_conditioning_from_encoder(encoder_tokens)
-            
+
             # Compute original metrics
             original_metrics = compute_accuracy_metrics(
                 encoder_tokens, pred_tokens, capo, tuning,
                 ground_truth_tokens=ground_truth_tokens
             )
             all_original_metrics.append(original_metrics)
-            
+
             # Check if debug needed
             has_errors = (original_metrics['pitch_accuracy'] < 100 or
                          original_metrics['time_shift_accuracy'] < 100)
-            
+
             # Post-process
             postprocessed_tokens, correction_stats = postprocess_predictions(
                 encoder_tokens, pred_tokens, capo, tuning,
@@ -571,14 +643,14 @@ def main():
                 alignment_window=args.alignment_window,
                 debug=has_errors
             )
-            
+
             # Compute post-processed metrics
             postprocessed_metrics = compute_accuracy_metrics(
                 encoder_tokens, postprocessed_tokens, capo, tuning,
                 ground_truth_tokens=ground_truth_tokens
             )
             all_postprocessed_metrics.append(postprocessed_metrics)
-            
+
             # Print results
             print(f"  Original:       Tab={original_metrics['tab_accuracy']:.1f}%, "
                   f"Pitch={original_metrics['pitch_accuracy']:.1f}%, "
@@ -586,7 +658,7 @@ def main():
             print(f"  Post-processed: Tab={postprocessed_metrics['tab_accuracy']:.1f}%, "
                   f"Pitch={postprocessed_metrics['pitch_accuracy']:.1f}%, "
                   f"TimeShift={postprocessed_metrics['time_shift_accuracy']:.1f}%")
-            
+
             if has_errors or correction_stats['pitch_corrections'] > 0 or correction_stats['time_shift_corrections'] > 0:
                 print(f"  Corrections: Pitch={correction_stats['pitch_corrections']}, "
                       f"TimeShift={correction_stats['time_shift_corrections']}, "
@@ -602,7 +674,7 @@ def main():
             conditioning_tunings_eval=(STANDARD_TUNING,),
         )
 
-        manifest_file = f"data/{args.dataset.lower()}_acoustic_{args.split}.jsonl"
+        manifest_file = f"data/{args.dataset.lower()}_acoustic_{args.split}{args.manifest_suffix}.jsonl"
 
         if not Path(manifest_file).exists():
             print(f"ERROR: Manifest file not found: {manifest_file}")
@@ -654,6 +726,7 @@ def main():
             if torch.cuda.is_available():
                 input_ids = input_ids.cuda()
 
+            # Generate prediction with constrained decoding
             with torch.no_grad():
                 outputs = model.generate(
                     input_ids,
@@ -662,6 +735,7 @@ def main():
                     do_sample=False,
                     eos_token_id=tokenizer.shared_token_to_id["<eos>"],
                     pad_token_id=tokenizer.shared_token_to_id["<pad>"],
+                    logits_processor=[constrained_processor],
                 )
 
             pred_ids = outputs[0].cpu().tolist()
