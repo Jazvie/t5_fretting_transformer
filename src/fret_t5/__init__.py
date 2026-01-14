@@ -23,6 +23,14 @@ from .postprocess import (
     postprocess_decoder_tokens,
 )
 from .inference import FretT5Inference
+from .constrained_generation import (
+    V3ConstrainedProcessor,
+    ForcedTokenLogitsProcessor,
+    create_v3_processor,
+    TabConstraintProcessor,
+    build_v3_constraint_processor,
+    validate_v3_sequence,
+)
 
 __all__ = [
     "MidiTabTokenizerV3",
@@ -53,4 +61,11 @@ __all__ = [
     "postprocess_to_timed_tabs",
     "tab_events_to_dict_list",
     "postprocess_decoder_tokens",
+    # Constrained generation
+    "V3ConstrainedProcessor",
+    "ForcedTokenLogitsProcessor",
+    "create_v3_processor",
+    "TabConstraintProcessor",
+    "build_v3_constraint_processor",
+    "validate_v3_sequence",
 ]

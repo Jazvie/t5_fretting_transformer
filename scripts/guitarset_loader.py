@@ -158,17 +158,21 @@ def debug_guitarset_string_mapping(jams_data: Dict):
             print(f"  annotation {i}: data_source='{data_source}', notes={data_count}, pitch_range={min_pitch}-{max_pitch}")
 
 
-def extract_tablature_from_guitarset_jams(jams_data: Dict, auto_detect_tuning=False) -> List[Dict]:
+def extract_tablature_from_guitarset_jams(
+    jams_data: Dict, 
+    auto_detect_tuning: bool = False,
+    inverted_string_convention: bool = False,
+) -> List[Dict]:
     """Extract tablature events directly from GuitarSet JAMS per-string annotations.
 
     Uses the 6 separate note_midi annotations to get ground truth string assignments.
     GuitarSet data_source field maps to strings as follows:
-    - data_source "0" -> String 6 (Low E)
-    - data_source "1" -> String 5 (A)
-    - data_source "2" -> String 4 (D)
-    - data_source "3" -> String 3 (G)
-    - data_source "4" -> String 2 (B)
-    - data_source "5" -> String 1 (High E)
+    - data_source "0" -> String 6 (Low E) [or String 1 if inverted]
+    - data_source "1" -> String 5 (A)     [or String 2 if inverted]
+    - data_source "2" -> String 4 (D)     [or String 3 if inverted]
+    - data_source "3" -> String 3 (G)     [or String 4 if inverted]
+    - data_source "4" -> String 2 (B)     [or String 5 if inverted]
+    - data_source "5" -> String 1 (High E)[or String 6 if inverted]
 
     Args:
         jams_data: GuitarSet JAMS data
@@ -176,20 +180,35 @@ def extract_tablature_from_guitarset_jams(jams_data: Dict, auto_detect_tuning=Fa
                            NOTE: GuitarSet is in standard tuning, so this should be False.
                            The auto-detection is flawed as it uses min(pitches) which finds
                            the lowest note played, not the open string pitch.
+        inverted_string_convention: If True, use inverted string numbering where
+                           String 1 = Low E (40) instead of High E (64).
+                           Default False uses standard guitar convention.
     """
     tab_events = []
 
-    # Standard guitar string mapping to match SynthTab training data conventions
-    # CRITICAL: Must match SynthTab's string_index mapping for consistent MIDI-to-TAB tokens
-    # String 1 = High E (64), String 6 = Low E (40) - Standard guitar convention
-    standard_tuning = {
-        "0": (6, 40),  # Low E  -> String 6 (standard)
-        "1": (5, 45),  # A      -> String 5
-        "2": (4, 50),  # D      -> String 4
-        "3": (3, 55),  # G      -> String 3
-        "4": (2, 59),  # B      -> String 2
-        "5": (1, 64)   # High E -> String 1 (standard)
-    }
+    # String mapping depends on convention choice
+    # Standard: String 1 = High E (64), String 6 = Low E (40)
+    # Inverted: String 1 = Low E (40), String 6 = High E (64)
+    if inverted_string_convention:
+        standard_tuning = {
+            "0": (1, 40),  # Low E  -> String 1 (inverted)
+            "1": (2, 45),  # A      -> String 2
+            "2": (3, 50),  # D      -> String 3
+            "3": (4, 55),  # G      -> String 4
+            "4": (5, 59),  # B      -> String 5
+            "5": (6, 64)   # High E -> String 6 (inverted)
+        }
+    else:
+        # Standard guitar string mapping to match SynthTab training data conventions
+        # CRITICAL: Must match SynthTab's string_index mapping for consistent MIDI-to-TAB tokens
+        standard_tuning = {
+            "0": (6, 40),  # Low E  -> String 6 (standard)
+            "1": (5, 45),  # A      -> String 5
+            "2": (4, 50),  # D      -> String 4
+            "3": (3, 55),  # G      -> String 3
+            "4": (2, 59),  # B      -> String 2
+            "5": (1, 64)   # High E -> String 1 (standard)
+        }
 
     # Find all note_midi annotations (should be 6, one per string)
     note_midi_annotations = [ann for ann in jams_data.get("annotations", [])

@@ -75,30 +75,41 @@ The model expects data in JAMS format with MIDI note annotations:
 1. Organize JAMS files in a directory (e.g., `data/guitarset/`)
 2. Files should contain `note_midi` annotations
 
-### SynthTab Training (Recommended)
+### Unified Training (SynthTab, GuitarSet, DadaGP, Custom)
 
 ```bash
-# With conditioning (capo 0-7, multiple tunings)
-python retrain_synthtab_corrected.py --output-dir checkpoints/synthtab
+# SynthTab with conditioning (capo 0-7, multiple tunings)
+python train.py --dataset synthtab --output-dir checkpoints/synthtab
 
-# Without conditioning (standard tuning, capo 0 only)
-python retrain_synthtab_no_conditioning.py --output-dir checkpoints/synthtab_baseline
-```
+# SynthTab without conditioning (standard tuning, capo 0 only)
+python train.py --dataset synthtab --no-conditioning --output-dir checkpoints/synthtab_baseline
 
-### GuitarSet Finetuning
-
-```bash
-# Full finetuning
-python train_guitarset.py \
+# GuitarSet finetuning from SynthTab checkpoint (full)
+python train.py --dataset guitarset \
     --pretrained-checkpoint checkpoints/synthtab/best_model.pt \
     --output-dir checkpoints/guitarset
 
-# LoRA finetuning (parameter-efficient)
-python train_guitarset.py \
+# GuitarSet with LoRA adapters
+python train.py --dataset guitarset \
     --pretrained-checkpoint checkpoints/synthtab/best_model.pt \
     --use-lora \
     --output-dir checkpoints/guitarset_lora
+
+# DadaGP training
+python train.py --dataset dadagp --output-dir checkpoints_dadagp
+
+# Custom manifests
+python train.py --dataset custom \
+    --train-manifest data/my_train.jsonl \
+    --val-manifest data/my_val.jsonl \
+    --output-dir checkpoints_custom
 ```
+
+Key flags:
+- `--conditioning/--no-conditioning` to toggle capo+tuning augmentation
+- `--guitarset-inverted-strings` to use inverted numbering (String 1 = Low E)
+- `--warmup-steps` to override warmup derived from epochs
+- `--use-t5-pretrained --model-name t5-small` to start from HF weights
 
 ## Postprocessing
 
@@ -182,7 +193,7 @@ fret_t5/
 │   ├── training.py       # Model creation & training utilities
 │   └── constraints.py    # Constrained decoding
 ├── universal_tokenizer/  # Pre-built tokenizer
-├── train_guitarset.py
-├── retrain_synthtab_corrected.py
+├── train.py              # Unified training entrypoint (synthtab/guitarset/dadagp/custom)
+├── scripts/              # Data prep and utilities
 └── test_best_model.py
 ```
