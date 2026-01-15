@@ -219,7 +219,8 @@ class GuitarSetDataset(torch.utils.data.Dataset):
                                 final_encoder = prefix_tokens + conditioned_encoder
                                 self._append_example(final_encoder, list(dec_tokens))
 
-            except Exception:
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                print(f"   Skipped {file_path.name}: {e}")
                 skipped += 1
                 continue
 
@@ -268,47 +269,43 @@ class GuitarSetDataset(torch.utils.data.Dataset):
 
     def _append_example(self, enc_tokens: List[str], dec_tokens: List[str]) -> None:
         """Convert tokens to tensor example."""
-        try:
-            input_ids = self.tokenizer.encode_encoder_tokens_shared(enc_tokens)
-            labels = self.tokenizer.encode_decoder_tokens_shared(dec_tokens)
+        input_ids = self.tokenizer.encode_encoder_tokens_shared(enc_tokens)
+        labels = self.tokenizer.encode_decoder_tokens_shared(dec_tokens)
 
-            input_ids = input_ids[:self.data_config.max_encoder_length]
-            labels = labels[:self.data_config.max_decoder_length]
+        input_ids = input_ids[:self.data_config.max_encoder_length]
+        labels = labels[:self.data_config.max_decoder_length]
 
-            attention_mask = [1] * len(input_ids)
+        attention_mask = [1] * len(input_ids)
 
-            pad_id = self.tokenizer.shared_token_to_id.get("<pad>", 0)
-            while len(input_ids) < self.data_config.max_encoder_length:
-                input_ids.append(pad_id)
-                attention_mask.append(0)
+        pad_id = self.tokenizer.shared_token_to_id.get("<pad>", 0)
+        while len(input_ids) < self.data_config.max_encoder_length:
+            input_ids.append(pad_id)
+            attention_mask.append(0)
 
-            # Loss mask
-            if self.data_config.train_on_time_shift:
-                loss_values = [
-                    self.data_config.tab_loss_weight if token.startswith("TAB<")
-                    else 1.0 if token.startswith("TIME_SHIFT<")
-                    else 1.0 if token == "<eos>"
-                    else 0.0
-                    for token in dec_tokens
-                ]
-            else:
-                loss_values = [
-                    1.0 if token.startswith("TAB<") or token == "<eos>" else 0.0
-                    for token in dec_tokens
-                ]
+        if self.data_config.train_on_time_shift:
+            loss_values = [
+                self.data_config.tab_loss_weight if token.startswith("TAB<")
+                else 1.0 if token.startswith("TIME_SHIFT<")
+                else 1.0 if token == "<eos>"
+                else 0.0
+                for token in dec_tokens
+            ]
+        else:
+            loss_values = [
+                1.0 if token.startswith("TAB<") or token == "<eos>" else 0.0
+                for token in dec_tokens
+            ]
 
-            while len(labels) < self.data_config.max_decoder_length:
-                labels.append(-100)
-                loss_values.append(0.0)
+        while len(labels) < self.data_config.max_decoder_length:
+            labels.append(-100)
+            loss_values.append(0.0)
 
-            self.examples.append({
-                'input_ids': torch.tensor(input_ids, dtype=torch.long),
-                'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
-                'labels': torch.tensor(labels, dtype=torch.long),
-                'loss_mask': torch.tensor(loss_values, dtype=torch.float),
-            })
-        except Exception:
-            pass
+        self.examples.append({
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
+            'labels': torch.tensor(labels, dtype=torch.long),
+            'loss_mask': torch.tensor(loss_values, dtype=torch.float),
+        })
 
     def __len__(self) -> int:
         return len(self.examples)

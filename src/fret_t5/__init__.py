@@ -3,7 +3,6 @@
 from .tokenization import (
     MidiTabTokenizerV3,
     TokenizerConfig,
-    build_tokenizer_from_manifests,
     STANDARD_TUNING,
     DEFAULT_CONDITIONING_TUNINGS,
 )
@@ -35,7 +34,6 @@ from .constrained_generation import (
 __all__ = [
     "MidiTabTokenizerV3",
     "TokenizerConfig",
-    "build_tokenizer_from_manifests",
     "STANDARD_TUNING",
     "DEFAULT_CONDITIONING_TUNINGS",
     "DataConfig",

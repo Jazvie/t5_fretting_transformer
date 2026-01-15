@@ -107,7 +107,6 @@ class TokenizerConfig:
         if self.force_zero_time_shift and same_onset:
             return 0
 
-        # Cap at maximum duration
         duration_ms = min(duration_ms, self.max_duration_ms)
 
         if self.quantization_strategy == 'linear':
@@ -562,22 +561,3 @@ class MidiTabTokenizerV3:
             for tok in self.decoder_vocab.token_to_id
         }
 
-
-def build_tokenizer_from_manifests(
-    manifests: Sequence[str],
-    config: TokenizerConfig,
-) -> MidiTabTokenizerV3:
-    """DEPRECATED: Use MidiTabTokenizerV3.load("universal_tokenizer") instead.
-
-    This function builds dataset-specific vocabularies which leads to vocabulary
-    mismatches during evaluation. The universal tokenizer provides consistent
-    coverage for both SynthTab and GuitarSet datasets.
-
-    Raises:
-        DeprecationWarning: Always raised to prevent accidental usage.
-    """
-    raise DeprecationWarning(
-        "build_tokenizer_from_manifests() is deprecated. "
-        "Use MidiTabTokenizerV3.load('universal_tokenizer') instead for "
-        "consistent vocabulary coverage across SynthTab and GuitarSet datasets."
-    )

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 import pretty_midi
 import torch
@@ -146,15 +149,15 @@ def _load_tempo_map(tab_path: Path, midi_path: Optional[Path] = None) -> Optiona
             continue
         try:
             return _tempo_map_from_pretty_midi(candidate)
-        except Exception:
-            pass # Failed to read tempo from MIDI, try next candidate
+        except (IOError, ValueError, KeyError):
+            continue
 
     tempo_file = tab_path.parent / "tempo.txt"
     if tempo_file.exists():
         try:
             return _tempo_map_from_tempo_file(tempo_file)
-        except Exception:
-            pass # Failed to parse tempo map from file, return None
+        except (IOError, ValueError):
+            pass
 
     return None
 
@@ -320,7 +323,7 @@ def _parse_jams_events_simple(
 
 def _parse_jams_tablature(
     jams_data: Dict,
-    midi_dir: Path = None,
+    midi_dir: Optional[Path] = None,
     tempo_map: Optional[TempoMap] = None,
 ) -> List[Dict[str, float]]:
     """Parse SynthTab JAMS file to extract tablature events.
@@ -402,8 +405,8 @@ def _load_string_midi_notes(midi_dir: Path) -> Dict[int, List[Dict]]:
 
             string_notes[string_num] = notes
 
-        except Exception as e:
-            print(f"Warning: Could not load {string_file}: {e}")
+        except (IOError, OSError, ValueError) as e:
+            logger.warning("Could not load %s: %s", string_file, e)
             continue
 
     return string_notes
@@ -687,8 +690,8 @@ class SynthTabTokenDataset(Dataset):
                     # Tokenize directly from JAMS (perfect alignment guaranteed)
                     tokenised = self.tokenizer.tokenize_track_from_jams(jams_events)
 
-                except Exception as e:
-                    print(f"Warning: Failed to process {entry.track_id}: {e}")
+                except (IOError, OSError, ValueError, KeyError) as e:
+                    logger.warning("Failed to process %s: %s", entry.track_id, e)
                     continue
                 chunks = list(chunk_tokenized_track(tokenised, chunk_config))
 

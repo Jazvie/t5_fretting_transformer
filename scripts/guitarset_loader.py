@@ -324,48 +324,6 @@ def extract_tablature_from_guitarset_jams(
     return tab_events
 
 
-def midi_to_tablature_simple(notes: List[Dict]) -> List[Dict]:
-    """Convert MIDI notes to simple tablature using heuristic string assignment.
-
-    DEPRECATED: This function uses heuristics and should be replaced with
-    extract_tablature_from_guitarset_jams() for GuitarSet data.
-    """
-    tab_events = []
-
-    # Standard tuning MIDI notes for open strings (low to high)
-    open_strings = {
-        6: 40,  # Low E  (E2)
-        5: 45,  # A      (A2)
-        4: 50,  # D      (D3)
-        3: 55,  # G      (G3)
-        2: 59,  # B      (B3)
-        1: 64   # High E (E4)
-    }
-
-    for note in notes:
-        pitch = note['pitch']
-
-        # Find best string assignment (simple heuristic)
-        best_string = 1
-        best_fret = 24  # Max fret
-
-        for string_num, open_pitch in open_strings.items():
-            if pitch >= open_pitch:
-                fret = pitch - open_pitch
-                if 0 <= fret <= 24:  # Valid fret range
-                    if fret < best_fret:  # Prefer lower frets
-                        best_string = string_num
-                        best_fret = fret
-
-        tab_events.append({
-            'time': note['time'],
-            'duration': note['duration'],
-            'string': best_string,
-            'fret': best_fret
-        })
-
-    return tab_events
-
 
 def quantize_duration(duration_ms: float, quantum_ms: int = 100, max_duration_ms: int = 5000) -> int:
     """Apply same quantization as SynthTab tokenizer.
@@ -435,27 +393,26 @@ def test_guitarset_tokenization():
             jams_data = load_guitarset_jams(jams_file)
             print(f"   JAMS loaded successfully")
 
-            # Extract MIDI notes
+            # Extract tablature using ground truth string assignments
+            tab_events = extract_tablature_from_guitarset_jams(jams_data, auto_detect_tuning=False)
+            print(f"   Found {len(tab_events)} tablature events with ground truth strings")
+
+            if len(tab_events) == 0:
+                print("   ⚠️  No tablature events found in this file")
+                continue
+
+            # Also extract MIDI notes for comparison
             midi_notes = extract_midi_notes_from_guitarset(jams_data)
             print(f"   Found {len(midi_notes)} MIDI notes")
 
-            if len(midi_notes) == 0:
-                print("   ⚠️  No MIDI notes found in this file")
-                continue
-
             # Show first few notes
-            print(f"   First 5 notes:")
-            for j, note in enumerate(midi_notes[:5]):
-                print(f"     {j+1}. Time: {note['time']:.3f}s, Pitch: {note['pitch']}, Duration: {note['duration']:.3f}s")
-
-            # Convert to tablature
-            tab_events = midi_to_tablature_simple(midi_notes[:20])  # First 20 notes only
-            print(f"   Converted to {len(tab_events)} tablature events")
-
-            # Show first few tab events
             print(f"   First 5 tablature events:")
             for j, tab in enumerate(tab_events[:5]):
                 print(f"     {j+1}. String: {tab['string']}, Fret: {tab['fret']}, Time: {tab['time']:.3f}s")
+
+            # Use first 20 events for token conversion test
+            tab_events = tab_events[:20]
+            print(f"   Using first {len(tab_events)} tablature events for tokenization test")
 
             # Convert to tokens
             encoder_tokens, decoder_tokens = convert_to_tokens(tab_events)
@@ -463,8 +420,8 @@ def test_guitarset_tokenization():
 
             # Show quantization examples
             print(f"   Duration quantization examples:")
-            for j, (tab, note) in enumerate(zip(tab_events[:3], midi_notes[:3])):
-                raw_ms = note['duration'] * 1000
+            for j, tab in enumerate(tab_events[:3]):
+                raw_ms = tab['duration'] * 1000
                 quantized_ms = quantize_duration(raw_ms)
                 print(f"     {j+1}. {raw_ms:.0f}ms → {quantized_ms}ms")
 
@@ -482,24 +439,15 @@ def test_guitarset_tokenization():
     print("-" * 40)
 
     try:
-        # Build our trained tokenizer
-        tokenizer_config = TokenizerConfig(
-            time_shift_quantum_ms=100,
-            max_duration_ms=5000,
-            force_zero_time_shift=True
-        )
+        from fret_t5 import MidiTabTokenizerV3
 
-        tokenizer = build_tokenizer_from_manifests(
-            ["data/synthtab_acoustic_all.jsonl"],
-            tokenizer_config
-        )
-
+        tokenizer = MidiTabTokenizerV3.load("universal_tokenizer")
         print(f"   Tokenizer loaded: {len(tokenizer.shared_token_to_id)} vocab size")
 
         # Test tokenization on GuitarSet data
         if encoder_tokens and decoder_tokens:
             # Encode tokens
-            encoder_ids = tokenizer.encode_encoder_tokens_shared(encoder_tokens[:50])  # First 50 tokens
+            encoder_ids = tokenizer.encode_encoder_tokens_shared(encoder_tokens[:50])
             decoder_ids = tokenizer.encode_decoder_tokens_shared(decoder_tokens[:50])
 
             print(f"   Encoded {len(encoder_ids)} encoder IDs, {len(decoder_ids)} decoder IDs")

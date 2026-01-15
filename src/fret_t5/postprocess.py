@@ -211,9 +211,9 @@ def parse_tab_token(tab_token: str) -> Optional[Tuple[int, int]]:
         parts = content.split(',')
         if len(parts) == 2:
             return (int(parts[0]), int(parts[1]))
-    except ValueError:
         return None
-    return None
+    except (ValueError, IndexError):
+        return None
 
 
 def parse_time_shift_token(time_shift_token: str) -> Optional[int]:
@@ -221,9 +221,8 @@ def parse_time_shift_token(time_shift_token: str) -> Optional[int]:
     try:
         content = time_shift_token[11:-1]  # Remove "TIME_SHIFT<" and ">"
         return int(content)
-    except ValueError:
+    except (ValueError, IndexError):
         return None
-    return None
 
 
 def parse_note_on_token(note_on_token: str) -> Optional[int]:
@@ -231,9 +230,8 @@ def parse_note_on_token(note_on_token: str) -> Optional[int]:
     try:
         content = note_on_token[8:-1]  # Remove "NOTE_ON<" and ">"
         return int(content)
-    except ValueError:
+    except (ValueError, IndexError):
         return None
-    return None
 
 
 def parse_capo_token(capo_token: str) -> Optional[int]:
@@ -241,9 +239,8 @@ def parse_capo_token(capo_token: str) -> Optional[int]:
     try:
         content = capo_token[5:-1]  # Remove "CAPO<" and ">"
         return int(content)
-    except ValueError:
+    except (ValueError, IndexError):
         return None
-    return None
 
 
 def parse_tuning_token(tuning_token: str) -> Optional[Tuple[int, ...]]:
@@ -253,9 +250,9 @@ def parse_tuning_token(tuning_token: str) -> Optional[Tuple[int, ...]]:
         pitches = tuple(int(p) for p in content.split(','))
         if len(pitches) == 6:
             return pitches
-    except ValueError:
         return None
-    return None
+    except (ValueError, IndexError):
+        return None
 
 
 def extract_input_notes(encoder_tokens: List[str]) -> List[Tuple[int, int]]:
