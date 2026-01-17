@@ -672,13 +672,10 @@ def postprocess_with_timing(
     for input_idx, output_idx in alignments:
         out_string, out_fret, out_time_shift = output_tabs[output_idx]
         
-        # Require valid input alignment for timing reconstruction
+        # Skip outputs with no matching input (model generated more tabs than input notes)
+        # This can happen when the model hallucinates extra chord notes
         if input_idx is None:
-            raise ValueError(
-                f"Cannot reconstruct timing: output tab {output_idx} has no matching input note. "
-                f"Model produced {len(output_tabs)} tabs for {len(input_notes)} input notes. "
-                f"This indicates the model generated more outputs than inputs."
-            )
+            continue
         
         if input_idx >= len(timing_context.note_timings):
             raise ValueError(
