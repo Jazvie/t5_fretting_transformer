@@ -20,6 +20,9 @@ from .postprocess import (
     postprocess_to_timed_tabs,
     tab_events_to_dict_list,
     postprocess_decoder_tokens,
+    # Fret span playability functions
+    calculate_fret_span,
+    is_chord_playable,
 )
 from .inference import FretT5Inference
 from .constrained_generation import (
@@ -59,6 +62,9 @@ __all__ = [
     "postprocess_to_timed_tabs",
     "tab_events_to_dict_list",
     "postprocess_decoder_tokens",
+    # Fret span playability
+    "calculate_fret_span",
+    "is_chord_playable",
     # Constrained generation
     "V3ConstrainedProcessor",
     "ForcedTokenLogitsProcessor",

@@ -156,6 +156,8 @@ class FretT5Inference:
         tuning: tuple,
         pitch_window: int,
         alignment_window: int,
+        max_fret_span: int = 5,
+        enforce_playability: bool = True,
     ) -> List[TabEvent]:
         """Run inference on a single chunk of notes (internal method)."""
         # Create encoder tokens and timing context
@@ -198,6 +200,8 @@ class FretT5Inference:
             tuning=tuning,
             pitch_window=pitch_window,
             alignment_window=alignment_window,
+            max_fret_span=max_fret_span,
+            enforce_playability=enforce_playability,
         )
 
         return tab_events
@@ -211,6 +215,8 @@ class FretT5Inference:
         alignment_window: int = 5,
         forced_tokens: Optional[Dict[int, int]] = None,
         return_dict: bool = False,
+        max_fret_span: int = 5,
+        enforce_playability: bool = True,
     ) -> List[TabEvent] | List[Dict]:
         """Generate tablature from MIDI notes with original timing preserved.
 
@@ -241,6 +247,10 @@ class FretT5Inference:
             Dict of {step: token_id} to force specific outputs (only used for single chunk)
         return_dict : bool, optional
             If True, return list of dicts instead of TabEvent objects (default: False)
+        max_fret_span : int, optional
+            Maximum allowed fret span for playable chords (default: 5)
+        enforce_playability : bool, optional
+            If True, apply fret span constraint to chords (default: True)
 
         Returns
         -------
@@ -269,7 +279,8 @@ class FretT5Inference:
         # If sequence fits in single chunk, use simple path
         if len(sorted_notes) <= MAX_NOTES_PER_CHUNK:
             tab_events = self._predict_single_chunk(
-                sorted_notes, capo, tuning, pitch_window, alignment_window
+                sorted_notes, capo, tuning, pitch_window, alignment_window,
+                max_fret_span, enforce_playability
             )
             if return_dict:
                 return tab_events_to_dict_list(tab_events)
@@ -286,7 +297,8 @@ class FretT5Inference:
 
             # Run inference on this chunk
             chunk_events = self._predict_single_chunk(
-                chunk_notes, capo, tuning, pitch_window, alignment_window
+                chunk_notes, capo, tuning, pitch_window, alignment_window,
+                max_fret_span, enforce_playability
             )
 
             if chunk_idx == 0:
