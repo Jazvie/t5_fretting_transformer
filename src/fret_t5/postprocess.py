@@ -304,15 +304,12 @@ def refinger_chord_for_playability(
     tuning: Tuple[int, ...] = STANDARD_TUNING,
     max_span: int = 5
 ) -> List[Tuple[int, int]]:
-    """Re-finger an unplayable chord to satisfy fret span constraint.
+    """Find the most playable fingering for a chord.
 
-    Algorithm:
-    1. If already playable, return as-is
-    2. Find all alternative fingerings for each note
-    3. Use backtracking search to find valid combination where:
-       - No duplicate strings
-       - Fret span <= max_span
-    4. If no solution, return original (with warning logged)
+    Two-pass global span minimization algorithm:
+    - Priority 1: Satisfy span <= max_span (strict mode)
+    - Priority 2: Minimize span (best effort) if strict constraint is impossible
+    - NEVER removes notes - all pitches are preserved
 
     Args:
         chord_positions: List of (string, fret) tuples for current chord
@@ -322,12 +319,12 @@ def refinger_chord_for_playability(
         max_span: Maximum allowed fret span (default 5)
 
     Returns:
-        List of (string, fret) tuples with valid fret span, or original if no solution
+        List of (string, fret) tuples with minimum achievable fret span
     """
     import logging
     logger = logging.getLogger(__name__)
 
-    # Check if already playable
+    # 1. Quick check: Is original already valid?
     if is_chord_playable(chord_positions, max_span):
         return chord_positions
 
@@ -335,63 +332,98 @@ def refinger_chord_for_playability(
         logger.warning("Mismatch between positions and pitches, returning original")
         return chord_positions
 
-    # Find alternatives for each note
+    # 2. Prepare alternatives (sorted by proximity to original)
     all_alternatives: List[List[Tuple[int, int]]] = []
-    for pitch in midi_pitches:
+    for pitch, (_, orig_fret) in zip(midi_pitches, chord_positions):
         alternatives = find_alternative_fingerings(pitch, capo, tuning)
         if not alternatives:
             # No valid fingering exists for this pitch
             logger.warning(f"No valid fingering for pitch {pitch}, returning original")
             return chord_positions
+        # Sort by proximity to original fret position
+        alternatives.sort(key=lambda x: abs(x[1] - orig_fret))
         all_alternatives.append(alternatives)
 
-    # Backtracking search for valid combination
+    # 3. State for global minimum search
+    best_solution: Optional[List[Tuple[int, int]]] = None
+    min_span_found = float('inf')
+
     def backtrack(
-        note_idx: int,
+        idx: int,
         current_solution: List[Tuple[int, int]],
-        used_strings: set
-    ) -> Optional[List[Tuple[int, int]]]:
-        """Recursively search for valid chord fingering."""
-        if note_idx == len(all_alternatives):
-            # Check if solution is playable
-            if is_chord_playable(current_solution, max_span):
-                return current_solution[:]
-            return None
+        used_strings: set,
+        current_min: int,
+        current_max: int,
+        strict_mode: bool
+    ) -> bool:
+        """Recursively search for valid chord fingering.
 
-        # Try each alternative for current note
-        for string, fret in all_alternatives[note_idx]:
+        Args:
+            idx: Current note index
+            current_solution: Partial solution being built
+            used_strings: Set of strings already used
+            current_min: Minimum fret in current solution (for fretted notes)
+            current_max: Maximum fret in current solution (for fretted notes)
+            strict_mode: If True, only accept solutions with span <= max_span
+
+        Returns:
+            True if a valid solution was found (in strict mode), False otherwise
+        """
+        nonlocal best_solution, min_span_found
+
+        # Pruning based on current span
+        if current_max > -1:
+            local_span = current_max - current_min
+            if strict_mode and local_span > max_span:
+                return False
+            if not strict_mode and local_span >= min_span_found:
+                return False
+
+        if idx == len(all_alternatives):
+            # Complete solution found
+            span = calculate_fret_span([f for _, f in current_solution])
+            if span < min_span_found:
+                min_span_found = span
+                best_solution = list(current_solution)
+            return strict_mode and span <= max_span
+
+        for string, fret in all_alternatives[idx]:
             if string in used_strings:
-                continue  # String already used
+                continue
 
-            # Pruning: check if current partial solution could be valid
-            trial_solution = current_solution + [(string, fret)]
-            frets = [f for _, f in trial_solution if f > 0]
-            if len(frets) > 1 and (max(frets) - min(frets)) > max_span:
-                continue  # Would exceed max span
+            # Update min/max for fretted notes only (open strings don't count)
+            new_min, new_max = current_min, current_max
+            if fret > 0:
+                if current_max == -1:
+                    new_min = new_max = fret
+                else:
+                    new_min, new_max = min(current_min, fret), max(current_max, fret)
 
             used_strings.add(string)
-            result = backtrack(note_idx + 1, trial_solution, used_strings)
-            if result is not None:
-                return result
+            if backtrack(idx + 1, current_solution + [(string, fret)],
+                        used_strings, new_min, new_max, strict_mode):
+                used_strings.remove(string)
+                return True
             used_strings.remove(string)
 
-        return None
+        return False
 
-    # Sort alternatives by proximity to original fingering for better solutions
-    for i, (orig_string, orig_fret) in enumerate(chord_positions):
-        all_alternatives[i].sort(key=lambda x: fret_stretch(orig_fret, x[1]))
+    # Pass 1: Strict search - find solution with span <= max_span
+    if backtrack(0, [], set(), -1, -1, strict_mode=True) and best_solution:
+        return best_solution
 
-    solution = backtrack(0, [], set())
+    # Pass 2: Best-effort optimization - find minimum possible span
+    logger.info(f"No strict solution for {midi_pitches}, optimizing for min span")
+    best_solution = None
+    min_span_found = float('inf')
+    backtrack(0, [], set(), -1, -1, strict_mode=False)
 
-    if solution is not None:
-        return solution
+    if best_solution:
+        logger.info(f"Found best-effort solution with span {min_span_found}")
+        return best_solution
 
-    # No valid solution found
-    logger.warning(
-        f"No playable chord found for pitches {midi_pitches} "
-        f"(original span: {calculate_fret_span([f for _, f in chord_positions])}), "
-        f"returning original"
-    )
+    # Only fails if notes can't be placed on distinct strings
+    logger.warning("Cannot combine notes on distinct strings, returning original")
     return chord_positions
 
 
@@ -836,8 +868,8 @@ def midi_notes_to_encoder_tokens_with_timing(
     sorted_notes = sorted(normalized_notes, key=lambda n: (n['onset'], n['pitch']))
     
     # Group notes by onset time to detect chords
-    # Notes within 10ms of each other are considered simultaneous
-    CHORD_THRESHOLD_SEC = 0.01
+    # Notes within 20ms of each other are considered simultaneous (captures typical strumming)
+    CHORD_THRESHOLD_SEC = 0.02
     
     onset_groups: List[List[Dict]] = []
     current_group: List[Dict] = []
