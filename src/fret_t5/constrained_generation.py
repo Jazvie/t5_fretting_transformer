@@ -38,13 +38,15 @@ class V3ConstrainedProcessor(LogitsProcessor):
     - After TIME_SHIFT<0>: must emit TAB<s,f> (continue chord)
     - After TIME_SHIFT>0: can emit TAB<s,f> (new onset) or EOS
     - Within chord: no duplicate strings, max 6 strings total
+    - Within chord: fret span (excluding open strings) must not exceed max_fret_span
 
     This preserves the v3 pairing structure and properly handles chords.
     """
 
-    def __init__(self, tokenizer: MidiTabTokenizerV3, max_chord_size: int = 6):
+    def __init__(self, tokenizer: MidiTabTokenizerV3, max_chord_size: int = 6, max_fret_span: int = 5):
         self.tokenizer = tokenizer
         self.max_chord_size = max_chord_size
+        self.max_fret_span = max_fret_span
 
         # Precompute token sets for efficiency
         self.tab_ids: Set[int] = set(tokenizer.get_tab_token_ids())
@@ -57,14 +59,16 @@ class V3ConstrainedProcessor(LogitsProcessor):
         if self.zero_time_shift_id == -1:
             print("Warning: No TIME_SHIFT<0> token found. Chords may not be representable.")
 
-        # Create string-to-tab mapping for chord validation
+        # Precompute string AND fret mappings for chord validation
         self.string_to_tab_ids: Dict[int, Set[int]] = {}
+        self.tab_token_info: Dict[int, tuple] = {}  # token_id -> (string, fret)
         for token, token_id in tokenizer.shared_token_to_id.items():
             if token.startswith("TAB<"):
-                # Extract string number from TAB<string,fret>
+                # Extract string and fret from TAB<string,fret>
                 parts = token[4:-1].split(",")
                 if len(parts) == 2:
-                    string_num = int(parts[0])
+                    string_num, fret_num = int(parts[0]), int(parts[1])
+                    self.tab_token_info[token_id] = (string_num, fret_num)
                     if string_num not in self.string_to_tab_ids:
                         self.string_to_tab_ids[string_num] = set()
                     self.string_to_tab_ids[string_num].add(token_id)
@@ -107,7 +111,7 @@ class V3ConstrainedProcessor(LogitsProcessor):
     def _get_allowed_tokens(self, last_token_id: int, chord_state: Dict = None) -> list[int]:
         """Get allowed next tokens based on v3 constraints and chord state."""
         if chord_state is None:
-            chord_state = {"strings_used": set(), "in_chord": False}
+            chord_state = {"strings_used": set(), "frets_used": [], "in_chord": False}
 
         if last_token_id in self.tab_ids:
             # After TAB: must emit TIME_SHIFT (0 or non-zero, no EOS)
@@ -122,25 +126,40 @@ class V3ConstrainedProcessor(LogitsProcessor):
 
         elif last_token_id == self.zero_time_shift_id:
             # After TIME_SHIFT<0>: must emit TAB (continue chord, no EOS)
-            allowed_tabs = list(self.tab_ids)
+            # Filter TABs to:
+            # 1. Exclude strings already used in this chord
+            # 2. Exclude frets that would make the chord span exceed max_fret_span
 
-            # Remove TABs for strings already used in this chord
-            if chord_state["strings_used"]:
-                filtered_tabs = []
-                for tab_id in allowed_tabs:
-                    token = self.tokenizer.shared_id_to_token.get(tab_id, "")
-                    if token.startswith("TAB<"):
-                        parts = token[4:-1].split(",")
-                        if len(parts) == 2:
-                            string_num = int(parts[0])
-                            if string_num not in chord_state["strings_used"]:
-                                filtered_tabs.append(tab_id)
-                allowed_tabs = filtered_tabs
+            current_frets = chord_state.get("frets_used", [])
+            min_fret = min(current_frets) if current_frets else None
+            max_fret = max(current_frets) if current_frets else None
+
+            allowed_tabs = []
+            for tab_id in self.tab_ids:
+                if tab_id not in self.tab_token_info:
+                    continue
+
+                string_num, fret_num = self.tab_token_info[tab_id]
+
+                # Skip if string already used
+                if string_num in chord_state["strings_used"]:
+                    continue
+
+                # Fret span check - only for non-open strings (fret > 0)
+                # Open strings don't require finger placement
+                if fret_num > 0 and min_fret is not None:
+                    new_min = min(min_fret, fret_num)
+                    new_max = max(max_fret, fret_num)
+                    if (new_max - new_min) > self.max_fret_span:
+                        continue
+
+                allowed_tabs.append(tab_id)
 
             return allowed_tabs
 
         elif last_token_id in self.time_shift_ids:
             # After TIME_SHIFT>0: can emit TAB (new onset) or EOS
+            # All TABs are allowed since hand has time to move
             return list(self.tab_ids) + [self.eos_id]
         else:
             # Start of sequence or special token: allow TAB only
@@ -156,12 +175,19 @@ class V3ConstrainedProcessor(LogitsProcessor):
         return -1
 
     def _track_chord_state(self, input_ids: torch.Tensor) -> List[Dict]:
-        """Track chord state for each sequence in the batch."""
+        """Track chord state for each sequence in the batch.
+
+        Returns a list of dicts with:
+        - strings_used: Set of string numbers used in current chord
+        - frets_used: List of fret numbers (excluding open strings) in current chord
+        - in_chord: Whether we are in the middle of a chord (after TIME_SHIFT<0>)
+        """
         batch_size = input_ids.shape[0]
         chord_states = []
 
         for b in range(batch_size):
             strings_used = set()
+            frets_used: List[int] = []
             in_chord = False
 
             # Scan backwards to find current chord state
@@ -179,14 +205,17 @@ class V3ConstrainedProcessor(LogitsProcessor):
                 if token_id == self.zero_time_shift_id:
                     in_chord = True
 
-                # If we hit a TAB token, add its string to the set
-                if token_id in self.tab_ids:
-                    string_num = self._extract_string_from_tab_token(token_id)
-                    if string_num != -1:
-                        strings_used.add(string_num)
+                # If we hit a TAB token, add its string and fret to the tracking
+                if token_id in self.tab_token_info:
+                    string_num, fret_num = self.tab_token_info[token_id]
+                    strings_used.add(string_num)
+                    # Only track non-open strings for fret span calculation
+                    if fret_num > 0:
+                        frets_used.append(fret_num)
 
             chord_states.append({
                 "strings_used": strings_used,
+                "frets_used": frets_used,
                 "in_chord": in_chord
             })
 

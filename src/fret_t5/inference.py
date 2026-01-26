@@ -29,8 +29,9 @@ OVERLAP_NOTES = 4  # Match training overlap
 class FretT5Inference:
     """Inference pipeline for Fretting-Transformer v3."""
 
-    def __init__(self, checkpoint_path: str, tokenizer_path: str = "universal_tokenizer", device: Optional[str] = None):
+    def __init__(self, checkpoint_path: str, tokenizer_path: str = "universal_tokenizer", device: Optional[str] = None, max_fret_span: int = 5):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.max_fret_span = max_fret_span
 
         if not os.path.exists(tokenizer_path):
              raise ValueError(f"Tokenizer not found at {tokenizer_path}")
@@ -104,7 +105,7 @@ class FretT5Inference:
         input_ids = self.tokenizer.encode_encoder_tokens_shared(full_tokens)
         input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
         
-        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer)]
+        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer, max_fret_span=self.max_fret_span)]
         if forced_tokens:
             logits_processors.append(ForcedTokenLogitsProcessor(forced_tokens))
             
@@ -175,7 +176,7 @@ class FretT5Inference:
         input_ids = self.tokenizer.encode_encoder_tokens_shared(full_tokens)
         input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
 
-        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer)]
+        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer, max_fret_span=self.max_fret_span)]
 
         with torch.no_grad():
             outputs = self.model.generate(
@@ -362,7 +363,7 @@ class FretT5Inference:
         input_ids = self.tokenizer.encode_encoder_tokens_shared(full_tokens)
         input_tensor = torch.tensor([input_ids], dtype=torch.long).to(self.device)
         
-        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer)]
+        logits_processors: List = [V3ConstrainedProcessor(self.tokenizer, max_fret_span=self.max_fret_span)]
         if forced_tokens:
             logits_processors.append(ForcedTokenLogitsProcessor(forced_tokens))
 
