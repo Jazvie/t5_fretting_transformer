@@ -5,14 +5,75 @@ A transformer-based model for converting MIDI to guitar tablature with preserved
 ## Installation
 
 ```bash
-git clone <repo-url>
-cd fret_t5
-uv sync
+# Clone the repository
+git clone https://github.com/Jazvie/t5_fretting_transformer.git
+cd t5_fretting_transformer
+
+# Install dependencies (choose one)
+uv sync              # using uv (recommended)
+pip install -e .     # using pip
 ```
 
-## Quick Start: Inference with Timing
+## Training
 
-The recommended way to run inference is using `FretT5Inference.predict_with_timing()`, which preserves original MIDI timing through the quantized model:
+### Supported Datasets
+
+| Dataset | Description | Source |
+|---------|-------------|--------|
+| **SynthTab** | Synthetic guitar tablature with conditioning support | Pre-processed manifests |
+| **GuitarSet** | Real guitar recordings with professional annotations | [GuitarSet](https://guitarset.weebly.com/) |
+| **DadaGP** | Large-scale Guitar Pro tablature collection | [DadaGP](https://github.com/dada-bots/dadaGP) |
+| **Custom** | Your own JAMS-format data | User-provided manifests |
+
+### Training Commands
+
+```bash
+# SynthTab with conditioning (capo 0-7, multiple tunings)
+python train.py --dataset synthtab --output-dir checkpoints/synthtab
+
+# SynthTab without conditioning (standard tuning, capo 0 only)
+python train.py --dataset synthtab --no-conditioning --output-dir checkpoints/synthtab_baseline
+
+# GuitarSet training (requires --guitarset-dir)
+python train.py --dataset guitarset \
+    --guitarset-dir /path/to/GuitarSet/annotation \
+    --output-dir checkpoints/guitarset
+
+# GuitarSet finetuning from pretrained checkpoint
+python train.py --dataset guitarset \
+    --guitarset-dir /path/to/GuitarSet/annotation \
+    --pretrained-checkpoint checkpoints/synthtab/best_model.pt \
+    --output-dir checkpoints/guitarset_finetuned
+
+# GuitarSet with LoRA adapters
+python train.py --dataset guitarset \
+    --guitarset-dir /path/to/GuitarSet/annotation \
+    --pretrained-checkpoint checkpoints/synthtab/best_model.pt \
+    --use-lora \
+    --output-dir checkpoints/guitarset_lora
+
+# DadaGP training
+python train.py --dataset dadagp --output-dir checkpoints/dadagp
+
+# Custom dataset with your own manifests
+python train.py --dataset custom \
+    --train-manifest data/my_train.jsonl \
+    --val-manifest data/my_val.jsonl \
+    --output-dir checkpoints/custom
+```
+
+### Key Training Flags
+
+- `--conditioning/--no-conditioning`: Toggle capo and tuning augmentation
+- `--guitarset-dir`: Path to GuitarSet annotation directory (required for guitarset dataset)
+- `--pretrained-checkpoint`: Initialize from a pretrained model
+- `--use-lora`: Use LoRA adapters for efficient finetuning
+- `--guitarset-inverted-strings`: Use inverted string numbering (String 1 = Low E)
+- `--use-t5-pretrained --model-name t5-small`: Start from HuggingFace T5 weights
+
+## Inference
+
+### Quick Start
 
 ```python
 from fret_t5 import FretT5Inference
@@ -53,71 +114,35 @@ tab_events = inference.predict_with_timing(midi_notes, return_dict=True)
 # Returns list of dicts with same fields
 ```
 
-## How Timing Preservation Works
-
-The model internally uses quantized TIME_SHIFT tokens (100ms steps), but the pipeline preserves original continuous timing:
-
-1. **Tokenization**: `midi_notes_to_encoder_tokens_with_timing()` creates quantized tokens for the model while storing original timing in a `TimingContext`
-2. **Inference**: Model generates tablature using quantized tokens
-3. **Postprocessing**: `postprocess_with_timing()` reconstructs original timing from `TimingContext`
-
-This means your output tablature has the exact timestamps from your input MIDI, suitable for sheet music or synchronized playback.
-
 ### Chord Handling
 
-Notes within 10ms of each other are detected as chords. Internal chord notes use `TIME_SHIFT<0>` tokens, while the last note in a chord carries the duration. All chord notes receive the same onset time in the output.
+Notes within 10ms of each other are detected as chords. All chord notes receive the same onset time in the output.
 
-## Training
-
-### Data Setup
-
-The model expects data in JAMS format with MIDI note annotations:
-1. Organize JAMS files in a directory (e.g., `data/guitarset/`)
-2. Files should contain `note_midi` annotations
-
-### Unified Training (SynthTab, GuitarSet, DadaGP, Custom)
+## Evaluation
 
 ```bash
-# SynthTab with conditioning (capo 0-7, multiple tunings)
-python train.py --dataset synthtab --output-dir checkpoints/synthtab
+# Evaluate model on a dataset
+python evaluate.py checkpoints/best_model.pt --dataset synthtab --split val --num-samples 50
 
-# SynthTab without conditioning (standard tuning, capo 0 only)
-python train.py --dataset synthtab --no-conditioning --output-dir checkpoints/synthtab_baseline
+# Evaluate on GuitarSet (requires --guitarset-dir)
+python evaluate.py checkpoints/best_model.pt \
+    --dataset guitarset \
+    --guitarset-dir /path/to/GuitarSet/annotation \
+    --split val
 
-# GuitarSet finetuning from SynthTab checkpoint (full)
-python train.py --dataset guitarset \
-    --pretrained-checkpoint checkpoints/synthtab/best_model.pt \
-    --output-dir checkpoints/guitarset
-
-# GuitarSet with LoRA adapters
-python train.py --dataset guitarset \
-    --pretrained-checkpoint checkpoints/synthtab/best_model.pt \
-    --use-lora \
-    --output-dir checkpoints/guitarset_lora
-
-# DadaGP training
-python train.py --dataset dadagp --output-dir checkpoints_dadagp
-
-# Custom manifests
-python train.py --dataset custom \
-    --train-manifest data/my_train.jsonl \
-    --val-manifest data/my_val.jsonl \
-    --output-dir checkpoints_custom
+# Post-processing evaluation
+python postprocess_best_model.py checkpoints/best_model.pt \
+    --dataset synthtab --split val --num_pieces 50
 ```
-
-Key flags:
-- `--conditioning/--no-conditioning` to toggle capo+tuning augmentation
-- `--guitarset-inverted-strings` to use inverted numbering (String 1 = Low E)
-- `--warmup-steps` to override warmup derived from epochs
-- `--use-t5-pretrained --model-name t5-small` to start from HF weights
 
 ## Postprocessing
 
 The postprocessing algorithm (Section 3.5 of the paper) corrects pitch errors in model output:
 
-1. **Pitch Correction**: If predicted pitch differs from input by ≤5 semitones, finds alternative fingering that matches input pitch
+1. **Pitch Correction**: If predicted pitch differs from input by <=5 semitones, finds alternative fingering that matches input pitch
 2. **Fingering Selection**: Uses `fret_stretch` metric to choose fingering closest to model's prediction
-3. **Timing Reconstruction**: Restores original continuous timing from `TimingContext`
+3. **Playability Constraint**: Ensures chord shapes have a fret span <= 5 (configurable)
+4. **Timing Reconstruction**: Restores original continuous timing from `TimingContext`
 
 ```python
 from fret_t5.postprocess import postprocess_with_timing
@@ -126,7 +151,7 @@ tab_events = postprocess_with_timing(
     encoder_tokens=tokens,
     decoder_tokens=model_output,
     timing_context=timing_ctx,
-    pitch_window=5,      # correct pitches within ±5 semitones
+    pitch_window=5,      # correct pitches within +/-5 semitones
     alignment_window=5,  # alignment window for sequence matching
 )
 ```
@@ -175,20 +200,20 @@ from fret_t5 import STANDARD_TUNING
 STANDARD_TUNING = (64, 59, 55, 50, 45, 40)  # E4, B3, G3, D3, A2, E2
 ```
 
-## Evaluation
+## How Timing Preservation Works
 
-```bash
-# Evaluate model on a dataset
-python evaluate.py checkpoints/best_model.pt --dataset synthtab --split val --num-samples 50
+The model internally uses quantized TIME_SHIFT tokens (100ms steps), but the pipeline preserves original continuous timing:
 
-# Postprocessing evaluation
-python postprocess_best_model.py checkpoints/best_model.pt --dataset synthtab --split val --num_pieces 50
-```
+1. **Tokenization**: `midi_notes_to_encoder_tokens_with_timing()` creates quantized tokens for the model while storing original timing in a `TimingContext`
+2. **Inference**: Model generates tablature using quantized tokens
+3. **Postprocessing**: `postprocess_with_timing()` reconstructs original timing from `TimingContext`
+
+This means your output tablature has the exact timestamps from your input MIDI, suitable for sheet music or synchronized playback.
 
 ## Project Structure
 
 ```
-fret_t5/
+t5_fretting_transformer/
 ├── src/fret_t5/
 │   ├── inference.py      # FretT5Inference class
 │   ├── postprocess.py    # Timing preservation & pitch correction
@@ -196,8 +221,9 @@ fret_t5/
 │   ├── training.py       # Model creation & training utilities
 │   └── constraints.py    # Constrained decoding
 ├── universal_tokenizer/  # Pre-built tokenizer
-├── train.py              # Unified training entrypoint (synthtab/guitarset/dadagp/custom)
+├── train.py              # Unified training entrypoint
+├── train_guitarset.py    # GuitarSet-specific training
 ├── evaluate.py           # Model evaluation
-├── scripts/              # Data prep and utilities
-└── postprocess_best_model.py  # Post-processing evaluation
+├── postprocess_best_model.py  # Post-processing evaluation
+└── scripts/              # Data preparation utilities
 ```
