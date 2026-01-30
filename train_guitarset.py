@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--guitarset-dir",
         type=str,
-        default="/data/akshaj/MusicAI/GuitarSet/annotation",
+        required=True,
         help="Path to GuitarSet annotation directory",
     )
     parser.add_argument(

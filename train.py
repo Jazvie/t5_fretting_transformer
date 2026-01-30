@@ -78,8 +78,7 @@ DATASET_PRESETS = {
         "default_eval_batch_size": 8,
     },
     "guitarset": {
-        "guitarset_dir": "/data/akshaj/MusicAI/GuitarSet/annotation",
-        "description": "GuitarSet real guitar recordings",
+        "description": "GuitarSet real guitar recordings (requires --guitarset-dir)",
         "default_conditioning": True,
         "default_epochs": 150,
         "default_batch_size": 16,
@@ -656,7 +655,12 @@ def main(args: argparse.Namespace) -> None:
 
     if args.dataset == "guitarset":
         # GuitarSet-specific loading
-        guitarset_dir = Path(args.guitarset_dir or preset["guitarset_dir"])
+        if not args.guitarset_dir:
+            raise ValueError(
+                "GuitarSet dataset requires --guitarset-dir argument. "
+                "Please provide the path to your GuitarSet annotation directory."
+            )
+        guitarset_dir = Path(args.guitarset_dir)
         if not guitarset_dir.exists():
             raise ValueError(f"GuitarSet directory not found: {guitarset_dir}")
 

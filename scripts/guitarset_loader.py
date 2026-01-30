@@ -250,7 +250,7 @@ def extract_tablature_from_guitarset_jams(
                 detected_tuning[data_source] = (string_num, detected_open, tuning_offset)
 
                 tuning_diff = detected_open - standard_open
-                status = "✅" if abs(tuning_diff) <= 1 else "⚠️"
+                status = "OK" if abs(tuning_diff) <= 1 else "WARN"
                 print(f"     {status} String {string_num}: detected {detected_open} vs standard {standard_open} (diff: {tuning_diff:+d})")
 
     # Use detected tuning if available, otherwise fall back to standard
@@ -319,7 +319,7 @@ def extract_tablature_from_guitarset_jams(
     tab_events.sort(key=lambda x: x['time'])
 
     if tab_events and auto_detect_tuning:
-        print(f"   📊 Extracted {len(tab_events)} valid tablature events")
+        print(f"   Extracted {len(tab_events)} valid tablature events")
 
     return tab_events
 
@@ -367,25 +367,24 @@ def convert_to_tokens(tab_events: List[Dict]) -> Tuple[List[str], List[str]]:
     return encoder_tokens, decoder_tokens
 
 
-def test_guitarset_tokenization():
+def test_guitarset_tokenization(guitarset_dir: Path):
     """Test GuitarSet data loading and tokenization."""
 
-    print("🎸 Testing GuitarSet Tokenization")
+    print("Testing GuitarSet Tokenization")
     print("=" * 50)
 
     # 1. Find a GuitarSet JAMS file
-    guitarset_dir = Path("/data/akshaj/MusicAI/GuitarSet/annotation")
     jams_files = list(guitarset_dir.glob("*.jams"))
 
     if not jams_files:
-        print("❌ No GuitarSet JAMS files found!")
+        print("ERROR: No GuitarSet JAMS files found!")
         return
 
     print(f"Found {len(jams_files)} GuitarSet JAMS files")
 
     # Test with first 3 files
     for i, jams_file in enumerate(jams_files[:3]):
-        print(f"\n📝 Testing file {i+1}: {jams_file.name}")
+        print(f"\nTesting file {i+1}: {jams_file.name}")
         print("-" * 40)
 
         try:
@@ -398,7 +397,7 @@ def test_guitarset_tokenization():
             print(f"   Found {len(tab_events)} tablature events with ground truth strings")
 
             if len(tab_events) == 0:
-                print("   ⚠️  No tablature events found in this file")
+                print("   WARNING: No tablature events found in this file")
                 continue
 
             # Also extract MIDI notes for comparison
@@ -430,12 +429,12 @@ def test_guitarset_tokenization():
             print(f"   Decoder tokens (first 10): {decoder_tokens[:10]}")
 
         except Exception as e:
-            print(f"   ❌ Error processing {jams_file.name}: {e}")
+            print(f"   ERROR: Error processing {jams_file.name}: {e}")
             import traceback
             traceback.print_exc()
 
     # 2. Test with our trained tokenizer
-    print(f"\n🔤 Testing with Trained Tokenizer")
+    print(f"\nTesting with Trained Tokenizer")
     print("-" * 40)
 
     try:
@@ -460,15 +459,26 @@ def test_guitarset_tokenization():
             print(f"   Unknown tokens: {encoder_unks} encoder, {decoder_unks} decoder")
 
             if encoder_unks > 0 or decoder_unks > 0:
-                print("   ⚠️  Some tokens not in vocabulary - might need vocabulary expansion")
+                print("   WARNING: Some tokens not in vocabulary - might need vocabulary expansion")
             else:
-                print("   ✅ All tokens successfully encoded!")
+                print("   OK: All tokens successfully encoded!")
 
     except Exception as e:
-        print(f"   ❌ Error testing tokenizer: {e}")
+        print(f"   ERROR: Error testing tokenizer: {e}")
         import traceback
         traceback.print_exc()
 
 
 if __name__ == "__main__":
-    test_guitarset_tokenization()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Test GuitarSet data loading and tokenization")
+    parser.add_argument(
+        "--guitarset-dir",
+        type=str,
+        required=True,
+        help="Path to GuitarSet annotation directory"
+    )
+    args = parser.parse_args()
+
+    test_guitarset_tokenization(Path(args.guitarset_dir))

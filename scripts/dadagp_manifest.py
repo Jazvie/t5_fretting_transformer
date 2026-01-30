@@ -332,10 +332,24 @@ class ManifestStats:
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    # Test metadata loading
-    dadagp_path = "/data/andreaguz/DadaGP-v1.1"
+    parser = argparse.ArgumentParser(description="Test DadaGP manifest utilities")
+    parser.add_argument(
+        "--dadagp-path",
+        type=str,
+        required=True,
+        help="Path to DadaGP dataset directory"
+    )
+    parser.add_argument(
+        "--test-file",
+        type=str,
+        default=None,
+        help="Optional: specific .gp4 file to test extraction on"
+    )
+    args = parser.parse_args()
+
+    dadagp_path = args.dadagp_path
 
     print("Loading DadaGP metadata...")
     metadata = load_dadagp_metadata(dadagp_path)
@@ -346,14 +360,15 @@ if __name__ == "__main__":
     train_count = len(metadata) - val_count
     print(f"Training: {train_count}, Validation: {val_count}")
 
-    # Test extraction
-    test_file = "/data/andreaguz/DadaGP-v1.1/D/De mono/De Mono - Znow Jestes Ze Mna.gp4"
-    artist, song = extract_artist_song(test_file)
-    print(f"\nTest extraction:")
-    print(f"  File: {test_file}")
-    print(f"  Artist: {artist}")
-    print(f"  Song: {song}")
-    print(f"  Is validation: {is_validation_file(test_file, metadata)}")
+    # Test extraction if test file provided
+    if args.test_file:
+        test_file = args.test_file
+        artist, song = extract_artist_song(test_file)
+        print(f"\nTest extraction:")
+        print(f"  File: {test_file}")
+        print(f"  Artist: {artist}")
+        print(f"  Song: {song}")
+        print(f"  Is validation: {is_validation_file(test_file, metadata)}")
 
     # Test normalization
     test_names = [

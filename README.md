@@ -146,7 +146,10 @@ class FretT5Inference:
         tuning: tuple = STANDARD_TUNING,
         pitch_window: int = 5,
         alignment_window: int = 5,
+        forced_tokens: Optional[Dict[int, int]] = None,
         return_dict: bool = False,
+        max_fret_span: int = 5,       # Maximum fret span for playable chords
+        enforce_playability: bool = True,  # Enforce playable chord shapes
     ) -> List[TabEvent] | List[Dict]
     
     def predict(
@@ -172,11 +175,11 @@ from fret_t5 import STANDARD_TUNING
 STANDARD_TUNING = (64, 59, 55, 50, 45, 40)  # E4, B3, G3, D3, A2, E2
 ```
 
-## Testing
+## Evaluation
 
 ```bash
-# Performance test
-python test_best_model.py checkpoints/best_model.pt --num_samples 50 --split val
+# Evaluate model on a dataset
+python evaluate.py checkpoints/best_model.pt --dataset synthtab --split val --num-samples 50
 
 # Postprocessing evaluation
 python postprocess_best_model.py checkpoints/best_model.pt --dataset synthtab --split val --num_pieces 50
@@ -194,6 +197,7 @@ fret_t5/
 │   └── constraints.py    # Constrained decoding
 ├── universal_tokenizer/  # Pre-built tokenizer
 ├── train.py              # Unified training entrypoint (synthtab/guitarset/dadagp/custom)
+├── evaluate.py           # Model evaluation
 ├── scripts/              # Data prep and utilities
-└── test_best_model.py
+└── postprocess_best_model.py  # Post-processing evaluation
 ```

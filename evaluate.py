@@ -69,8 +69,7 @@ DATASET_PRESETS = {
         "description": "DadaGP Guitar Pro extracted data",
     },
     "guitarset": {
-        "guitarset_dir": "/data/akshaj/MusicAI/GuitarSet/annotation",
-        "description": "GuitarSet real guitar recordings",
+        "description": "GuitarSet real guitar recordings (requires --guitarset-dir)",
     },
     "custom": {
         "description": "Custom dataset from user-provided manifest",
@@ -494,7 +493,14 @@ def main():
     examples = []
 
     if args.dataset == "guitarset":
-        guitarset_dir = Path(args.guitarset_dir or preset["guitarset_dir"])
+        if not args.guitarset_dir:
+            raise ValueError(
+                "GuitarSet dataset requires --guitarset-dir argument. "
+                "Please provide the path to your GuitarSet annotation directory."
+            )
+        guitarset_dir = Path(args.guitarset_dir)
+        if not guitarset_dir.exists():
+            raise ValueError(f"GuitarSet directory not found: {guitarset_dir}")
         split_file = Path(args.split_file) if args.split_file else None
         examples = load_guitarset_examples(
             guitarset_dir, tokenizer, args.split, split_file

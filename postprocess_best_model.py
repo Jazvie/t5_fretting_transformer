@@ -454,8 +454,8 @@ def main():
     parser.add_argument('--alignment_window', type=int, default=5,
                         help='Alignment window for matching input to output')
     parser.add_argument('--guitarset_dir', type=str,
-                        default='/data/akshaj/MusicAI/GuitarSet/annotation',
-                        help='Path to GuitarSet annotation directory')
+                        default=None,
+                        help='Path to GuitarSet annotation directory (required for --dataset guitarset)')
     parser.add_argument('--split_file', type=str,
                         default='splits/guitarset_h5_recording_splits_WITH_LEAKAGE.json',
                         help='Path to GuitarSet split file (for --dataset guitarset)')
@@ -517,6 +517,10 @@ def main():
             print(f"\nUsing split file: {split_file}")
             print(f"Found {len(jams_files)} GuitarSet files in {args.guitarset_split} split")
         else:
+            if not args.guitarset_dir:
+                print("ERROR: GuitarSet dataset requires --guitarset_dir argument.")
+                print("Please provide the path to your GuitarSet annotation directory.")
+                return
             guitarset_dir = Path(args.guitarset_dir)
             if not guitarset_dir.exists():
                 print(f"ERROR: GuitarSet directory not found at {guitarset_dir}")
